@@ -439,6 +439,17 @@ class ScntTrainingSet:
         else:
             self.sources = {}
 
+        # per-sample list of flavours that actually contain it (a flavour may cover
+        # only a subset of samples), so mixing never reads a missing file
+        self._flavours_for = {h: [] for h in self.hashes}
+        for flavour in self.input_flavours:
+            present = {os.path.splitext(n)[0]
+                       for n in os.listdir(os.path.join(self._tmp, flavour))
+                       if n.endswith('.mrc')}
+            for h in self.hashes:
+                if h in present:
+                    self._flavours_for[h].append(flavour)
+
         first_in = self._read_input(self.hashes[0], self.annotated_flavour)
         self.box_depth = int(meta.get('box_depth', first_in.shape[0]))
         self.box_shape = int(meta.get('box_size', self._read_label(self.hashes[0]).shape[0]))
@@ -468,8 +479,10 @@ class ScntTrainingSet:
 
     def get_sample(self, index, training=True):
         h = self.hashes[index]
-        if training and len(self.input_flavours) > 1:
-            pool = list(self.input_flavours)
+        # only mix flavours present for this sample
+        available = self._flavours_for.get(h) or [self.annotated_flavour]
+        if training and len(available) > 1:
+            pool = list(available)
             if self.annotated_flavour in pool:
                 pool.append(self.annotated_flavour)  # double-weight the annotated flavour
             fa, fb = random.sample(pool, 2)
@@ -478,7 +491,8 @@ class ScntTrainingSet:
             f = random.uniform(0.0, 1.0)
             vol = a * f + b * (1.0 - f)
         else:
-            vol = self._read_input(h, self.annotated_flavour)
+            flavour = self.annotated_flavour if self.annotated_flavour in available else available[0]
+            vol = self._read_input(h, flavour)
 
         x = np.transpose(vol, (1, 2, 0)).astype(np.float32)        # (H, W, D)
         y = self._read_label(h)[:, :, None].astype(np.float32)      # (H, W, 1)
