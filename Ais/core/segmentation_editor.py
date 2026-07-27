@@ -14,6 +14,7 @@ import pyperclip
 import os
 import math
 import subprocess
+import tempfile
 import shutil
 from time import sleep
 from Ais.core.util import pick_particles, icosphere_va
@@ -398,12 +399,20 @@ class SegmentationEditor:
                 sef.autocontrast = not sef.autocontrast
                 if sef.autocontrast:
                     sef.compute_autocontrast()
+            if imgui.is_key_pressed(glfw.KEY_Z) and self.filters:
+                # Toggle all filters on/off; works whether or not the Filters panel is open.
+                any_enabled = any(flt.enabled for flt in self.filters)
+                for flt in self.filters:
+                    flt.enabled = not any_enabled
+                SegmentationEditor.FRAME_TEXTURE_REQUIRES_UPDATE |= True
             if imgui.is_key_pressed(glfw.KEY_SPACE):
                 self.camera = Camera()
                 self.camera3d = Camera3D()
                 self.camera.zoom = SegmentationEditor.DEFAULT_ZOOM
                 SegmentationEditor.VIEW_REQUIRES_UPDATE = True
             if self.active_tab == "Segmentation" and cfg.se_active_frame.active_feature is not None:
+                if imgui.is_key_pressed(glfw.KEY_X):
+                    cfg.se_active_frame.active_feature.hide = not cfg.se_active_frame.active_feature.hide
                 if imgui.is_key_pressed(glfw.KEY_F):
                     if not SegmentationEditor.is_shift_down():
                         cfg.se_active_frame.active_feature.magic = not cfg.se_active_frame.active_feature.magic
@@ -451,7 +460,7 @@ class SegmentationEditor:
         if self.active_tab == "Segmentation":
             if active_feature is not None:
                 if SegmentationEditor.is_ctrl_down() and active_feature is not None:
-                    active_feature.brush_size += 2.5 * self.window.scroll_delta[1]
+                    active_feature.brush_size += 0.5 * self.window.scroll_delta[1]
                     active_feature.brush_size = max([1, active_feature.brush_size])
                 if imgui.is_key_pressed(glfw.KEY_S) and not imgui.is_key_down(glfw.KEY_LEFT_CONTROL):
                     idx = 0 if active_feature not in active_frame.features else active_frame.features.index(active_feature)
@@ -481,7 +490,7 @@ class SegmentationEditor:
                             try:
                                 Brush.apply_magic(active_feature, active_feature.parent.rendered_data, pixel_coordinate)
                             except Exception as e:
-                                pass  # bit experimental still. TODO: fix error thrown when flood fill ROI partially falls outside image.
+                                pass  # defensive guard around the flood-fill brush; the edge-of-image case is handled in apply_magic.
                         else:
                             Brush.apply_circular(active_feature, pixel_coordinate, True)
                         if _inside_frame:   # no reward for painting off the tomogram
@@ -729,7 +738,7 @@ class SegmentationEditor:
                 imgui.push_style_color(imgui.COLOR_POPUP_BACKGROUND, *cfg.COLOUR_WINDOW_BACKGROUND)
                 if imgui.begin_popup_context_window():
                     imgui.text(f"Welcome to {cfg.app_name}!")
-                    imgui.text(f"version {cfg.version}\nsource: github.com/bionanopatterning/Ais\nmanual: ais-cryoet.readthedocs.org")
+                    imgui.text(f"version {cfg.version}\nsource: github.com/mgflast/Ais\nmanual: mgflast.github.io/Ais")
                     imgui.end_popup()
                 if self.window.focused and imgui.is_mouse_clicked(glfw.MOUSE_BUTTON_LEFT) and not imgui.is_window_hovered():
                     SegmentationEditor.SHOW_BOOT_SPRITE = False
@@ -876,9 +885,6 @@ class SegmentationEditor:
                             SegmentationEditor.FRAME_TEXTURE_REQUIRES_UPDATE |= True
                         imgui.same_line()
                         _, ftr.enabled = imgui.checkbox("##enabled", ftr.enabled)
-                        if imgui.is_key_pressed(glfw.KEY_Z):
-                            ftr.enabled = not ftr.enabled
-                            SegmentationEditor.FRAME_TEXTURE_REQUIRES_UPDATE |= True
                         if _:
                             SegmentationEditor.FRAME_TEXTURE_REQUIRES_UPDATE |= True
                         # Delete button
@@ -988,7 +994,6 @@ class SegmentationEditor:
                             imgui.pop_style_color(_nsc)
 
                         imgui.pop_item_width()
-                        f.brush_size = int(f.brush_size)
                         if _:
                             f.set_box_size(f.box_size)
                         # Show / fill checkboxes
@@ -1524,7 +1529,7 @@ class SegmentationEditor:
                         imgui.end_tab_bar()
 
                     if m.background_process_train is not None:
-                        self._gui_background_process_progress_bar(m.background_process_train)
+                        self._gui_background_process_progress_bar(m.background_process_train, colour=(*m.colour, 1.0))
                         # trickle XP orbs off the growing training bar toward the HUD
                         _tb0, _tb1 = imgui.get_item_rect_min(), imgui.get_item_rect_max()
                         _tp = min(1.0, m.background_process_train.progress)
@@ -2210,11 +2215,10 @@ class SegmentationEditor:
                             cfg.edit_setting("DARK_MODE", not cfg.settings["DARK_MODE"])
                             cfg.set_theme(cfg.settings["DARK_MODE"])
                         if imgui.begin_menu("Camera3D"):
-                            _, self.camera3d.yaw = imgui.input_float("Yaw", self.camera3d.yaw, 5.0, 20.0)
-                            if _:
-                                self.camera3d.on_update()
-                            _, self.camera3d.pitch = imgui.input_float("Pitch", self.camera3d.pitch, 5.0, 20.0)
-                            if _:
+                            changed_yaw, new_yaw = imgui.input_float("Yaw", self.camera3d.yaw, 5.0, 20.0)
+                            changed_pitch, new_pitch = imgui.input_float("Pitch", self.camera3d.pitch, 5.0, 20.0)
+                            if changed_yaw or changed_pitch:
+                                self.camera3d.set_euler(new_yaw, new_pitch)
                                 self.camera3d.on_update()
                             imgui.end_menu()
                         if imgui.begin_menu("Search directories"):
@@ -2529,7 +2533,7 @@ class SegmentationEditor:
                 imgui.set_next_window_size_constraints((800, 250), (1960, 1960))
                 imgui.push_style_color(imgui.COLOR_WINDOW_BACKGROUND, cfg.COLOUR_WINDOW_BACKGROUND[0], cfg.COLOUR_WINDOW_BACKGROUND[1], cfg.COLOUR_WINDOW_BACKGROUND[2], 1.0)
                 imgui.push_style_color(imgui.COLOR_RESIZE_GRIP, *cfg.COLOUR_WINDOW_BACKGROUND)
-                _, SegmentationEditor.FEATURE_LIB_OPEN = imgui.begin("Predefined features library", True, imgui.WINDOW_NO_SCROLLBAR | imgui.WINDOW_NO_COLLAPSE)
+                _, SegmentationEditor.FEATURE_LIB_OPEN = imgui.begin("Feature library", True, imgui.WINDOW_NO_SCROLLBAR | imgui.WINDOW_NO_COLLAPSE)
                 if SegmentationEditor.FEATURE_LIB_RENAME_TARGET != cfg.active_feature_library:
                     SegmentationEditor.FEATURE_LIB_RENAME_TARGET = cfg.active_feature_library
                     SegmentationEditor.FEATURE_LIB_RENAME_TEXT = cfg.active_feature_library
@@ -3511,18 +3515,26 @@ class SegmentationEditor:
         return paths
 
     @staticmethod
+    def _write_launch_script(template_name, substitutions):
+        # fill the template's data lines (matched by prefix) and write to a temp file rather than
+        # editing the packaged template in place - the install dir is often read-only (clusters).
+        with open(os.path.join(cfg.root, "core", template_name), "r") as f:
+            lines = f.readlines()
+        for i, line in enumerate(lines):
+            for prefix, value in substitutions.items():
+                if line.startswith(prefix):
+                    lines[i] = f"{prefix}= {value}\n"
+                    break
+        fd, script_path = tempfile.mkstemp(prefix="ais_", suffix=f"_{template_name}")
+        with os.fdopen(fd, "w") as f:
+            f.writelines(lines)
+        return script_path
+
+    @staticmethod
     def open_objs_in_blender(paths):
         try:
-            with open(os.path.join(cfg.root, "core", "open_in_blender.py"), "r") as f:
-                lines = f.readlines()
-
-            lines = [f"obj_paths = {paths}\n" if "obj_paths = [" in line else line for line in lines]
-
-            with open(os.path.join(cfg.root, "core", "open_in_blender.py"), "w") as f:
-                f.writelines(lines)
-
-            subprocess.Popen([cfg.settings["BLENDER_EXE"], "--python", os.path.join(cfg.root, "core", "open_in_blender.py")])
-
+            script_path = SegmentationEditor._write_launch_script("open_in_blender.py", {"obj_paths ": paths})
+            subprocess.Popen([cfg.settings["BLENDER_EXE"], "--python", script_path])
         except Exception as e:
             cfg.set_error(e, "Could not open models in Blender - is the path to the Blender executable set? See Settings -> 3rd Party Applications -> Blender ")
 
@@ -3538,20 +3550,14 @@ class SegmentationEditor:
                 level.append(m.level)
                 colour.append(m.colour)
                 dust.append(m.dust)
-            with open(os.path.join(cfg.root, "core", "open_in_chimerax.py"), "r") as f:
-                lines = f.readlines()
-
-            # super inefficient, but it works ...
-            lines = [f"paths = {paths}\n" if "paths = [" in line else line for line in lines]
-            lines = [f"level = {level}\n" if "level = [" in line else line for line in lines]
-            lines = [f"colour = {colour}\n" if "colour = [" in line else line for line in lines]
-            lines = [f"dust = {dust}\n" if "dust = [" in line else line for line in lines]
-            lines = [f"bgclr = {SegmentationEditor.RENDER_CLEAR_COLOUR}\n" if "bgclr = [" in line else line for line in lines]
-
-            with open(os.path.join(cfg.root, "core", "open_in_chimerax.py"), "w") as f:
-                f.writelines(lines)
-
-            subprocess.Popen([cfg.settings["CHIMERAX_EXE"], os.path.join(cfg.root, "core", "open_in_chimerax.py")])
+            script_path = SegmentationEditor._write_launch_script("open_in_chimerax.py", {
+                "paths ": paths,
+                "level ": level,
+                "colour ": colour,
+                "dust ": dust,
+                "bgclr ": list(SegmentationEditor.RENDER_CLEAR_COLOUR),
+            })
+            subprocess.Popen([cfg.settings["CHIMERAX_EXE"], script_path])
         except Exception as e:
             cfg.set_error(e, "Could not open volumes in ChimeraX - is the path to the ChimeraX executable set? See Settings -> 3rd Party Applications -> ChimeraX.")
 
@@ -3576,9 +3582,9 @@ class SegmentationEditor:
         else:
             if SegmentationEditor.is_shift_down():
                 if self.window.get_mouse_button(glfw.MOUSE_BUTTON_MIDDLE):
-                    self.camera3d.pitch += self.window.cursor_delta[1] * SegmentationEditor.VIEW_3D_PIVOT_SPEED
-                    self.camera3d.yaw += self.window.cursor_delta[0] * SegmentationEditor.VIEW_3D_PIVOT_SPEED
-                    self.camera3d.pitch = clamp(self.camera3d.pitch, -89.9, 89.9)
+                    # ChimeraX-style tumble: drag near the centre turns the scene in 3D,
+                    # drag near the edges rolls about the view axis.
+                    self.camera3d.arcball_rotate(self.window.cursor_pos_previous_frame, self.window.cursor_pos, self.window.width, self.window.height, SegmentationEditor.VIEW_3D_PIVOT_SPEED * 1.5)
                     if self.window.cursor_delta[0] != 0 or self.window.cursor_delta[1] != 0:
                         SegmentationEditor.VIEW_REQUIRES_UPDATE = True
                 self.camera3d.distance -= self.window.scroll_delta[1] * SegmentationEditor.VIEW_3D_MOVE_SPEED
@@ -3586,22 +3592,32 @@ class SegmentationEditor:
                     SegmentationEditor.VIEW_REQUIRES_UPDATE = True
                 self.camera3d.distance = max(10.0, self.camera3d.distance)
             elif SegmentationEditor.is_ctrl_down():
+                rotated = False
                 if imgui.is_key_pressed(glfw.KEY_LEFT, True):
-                    self.camera3d.yaw -= 5
+                    self.camera3d.rotate_world(self.camera3d.get_up(), -5)
+                    rotated = True
                 elif imgui.is_key_pressed(glfw.KEY_RIGHT, True):
-                    self.camera3d.yaw += 5
+                    self.camera3d.rotate_world(self.camera3d.get_up(), 5)
+                    rotated = True
                 if imgui.is_key_pressed(glfw.KEY_UP, True):
-                    self.camera3d.pitch -= 5
+                    self.camera3d.rotate_world(self.camera3d.get_right(), -5)
+                    rotated = True
                 elif imgui.is_key_pressed(glfw.KEY_DOWN, True):
-                    self.camera3d.pitch += 5
+                    self.camera3d.rotate_world(self.camera3d.get_right(), 5)
+                    rotated = True
+                if rotated:
+                    SegmentationEditor.VIEW_REQUIRES_UPDATE = True
             elif self.window.get_mouse_button(glfw.MOUSE_BUTTON_MIDDLE):
-                dx = -self.window.cursor_delta[0]
-                dy = -self.window.cursor_delta[1]
-                world_delta = self.camera3d.cursor_delta_to_world_delta((dx, dy))
+                cdx, cdy = self.window.cursor_delta[0], self.window.cursor_delta[1]
+                # pixels -> world units at the focus plane (perspective, 60 deg vertical fov). Move the
+                # focus opposite the cursor in x and with it in y (screen y is flipped) so the grabbed
+                # point stays under the cursor.
+                scale = 2.0 * self.camera3d.distance * np.tan(np.radians(30.0)) / max(1, self.window.height)
+                world_delta = self.camera3d.cursor_delta_to_world_delta((-cdx * scale, cdy * scale))
                 self.camera3d.focus[0] += world_delta[0]
                 self.camera3d.focus[1] += world_delta[1]
                 self.camera3d.focus[2] += world_delta[2]
-                if dx != 0 or dy != 0:
+                if cdx != 0 or cdy != 0:
                     SegmentationEditor.VIEW_REQUIRES_UPDATE = True
 
     def end_frame(self):
@@ -3635,14 +3651,17 @@ class Brush:
 
     @staticmethod
     def set_circular_roi_radius(radius):
+        # radius is a float; the grid half-size is ceil(radius) but the inclusion test
+        # uses the float radius, so fractional sizes give distinct masks
         if Brush.circular_roi_radius == radius:
             return
         Brush.circular_roi_radius = radius
-        Brush.circular_roi = np.zeros((2*radius+1, 2*radius+1), dtype=np.uint8)
-        r = radius**2
-        for x in range(0, 2*radius+1):
-            for y in range(0, 2*radius+1):
-                if ((x-radius)**2 + (y-radius)**2) < r:
+        R = int(np.ceil(radius))
+        Brush.circular_roi = np.zeros((2*R+1, 2*R+1), dtype=np.uint8)
+        r2 = radius**2
+        for x in range(0, 2*R+1):
+            for y in range(0, 2*R+1):
+                if ((x-R)**2 + (y-R)**2) < r2:
                     Brush.circular_roi[x, y] = True
 
     @staticmethod
@@ -3650,20 +3669,22 @@ class Brush:
         if Brush.magic_roi_radius == radius:
             return
         Brush.magic_roi_radius = radius
-        Brush.magic_roi = np.zeros((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
-        r = radius ** 2
-        for x in range(0, 2 * radius + 1):
-            for y in range(0, 2 * radius + 1):
-                if ((x - radius) ** 2 + (y - radius) ** 2) < r:
+        R = int(np.ceil(radius))
+        Brush.magic_roi = np.zeros((2 * R + 1, 2 * R + 1), dtype=np.uint8)
+        r2 = radius ** 2
+        for x in range(0, 2 * R + 1):
+            for y in range(0, 2 * R + 1):
+                if ((x - R) ** 2 + (y - R) ** 2) < r2:
                     Brush.magic_roi[x, y] = True
 
     @staticmethod
     def apply_circular(segmentation, center_coordinates, val=True):
         # check if the current slice already exists; if not, make it.
         segmentation.request_draw_in_current_slice()
-        r = int(segmentation.brush_size)
+        radius = float(segmentation.brush_size)
+        r = int(np.ceil(radius))   # integer grid half-size, matches the mask array
         center_coordinates[0], center_coordinates[1] = center_coordinates[1], center_coordinates[0]
-        Brush.set_circular_roi_radius(r)
+        Brush.set_circular_roi_radius(radius)
 
         x = [center_coordinates[0] - r, center_coordinates[0] + r + 1]
         y = [center_coordinates[1] - r, center_coordinates[1] + r + 1]
@@ -3695,9 +3716,10 @@ class Brush:
     @staticmethod
     def apply_magic(segmentation, image, center_coordinates):
         segmentation.request_draw_in_current_slice()
-        r = int(segmentation.brush_size)
+        radius = float(segmentation.brush_size)
+        r = int(np.ceil(radius))   # integer grid half-size, matches the mask array
         center_coordinates[0], center_coordinates[1] = center_coordinates[1], center_coordinates[0]
-        Brush.set_magic_roi_radius(r)
+        Brush.set_magic_roi_radius(radius)
 
         # set up the ROI coordinates and image coordinates of the region to sample from
         x, y = center_coordinates[0], center_coordinates[1]
@@ -3731,27 +3753,29 @@ class Brush:
             ry[1] -= (y[1] - segmentation.width)
             y[1] = segmentation.width
 
-        contiguous_mask = np.zeros((rx[1]-rx[0], ry[1]-ry[0]), dtype=np.uint8)
+        # mask in full 2r+1 ROI coordinates so edge-clamping the sampled region can't shift the
+        # indices (the earlier clamped-size mask threw IndexError when clamped at the top/left edge).
+        size = 2 * r + 1
+        contiguous_mask = np.zeros((size, size), dtype=np.uint8)
         for _x, _rx in zip(range(x[0], x[1]), range(rx[0], rx[1])):
             for _y, _ry in zip(range(y[0], y[1]), range(ry[0], ry[1])):
                 if Brush.magic_roi[_rx, _ry] and value_range[0] < image[_x, _y] < value_range[1]:
                     contiguous_mask[_rx, _ry] = 1
 
-        stack = [(r - rx[0], r - ry[0])]
-        w, h = (rx[1] - rx[0], ry[1] - ry[0])
+        stack = [(r, r)]  # the brush centre is always at (r, r) in ROI coordinates
         while stack:
             mx, my = stack.pop()
             if contiguous_mask[mx, my] == 1:
                 contiguous_mask[mx, my] = 2
-                if mx + 1 < w:
+                if mx + 1 < size:
                     stack.append((mx + 1, my))
                 if mx - 1 >= 0:
                     stack.append((mx - 1, my))
-                if my + 1 < h:
+                if my + 1 < size:
                     stack.append((mx, my + 1))
                 if my - 1 >= 0:
                     stack.append((mx, my - 1))
-        contiguous_mask = contiguous_mask == 2
+        contiguous_mask = (contiguous_mask == 2)[rx[0]:rx[1], ry[0]:ry[1]]
         segmentation.data[x[0]:x[1], y[0]:y[1]] += contiguous_mask
         segmentation.data[x[0]:x[1], y[0]:y[1]] = np.clip(segmentation.data[x[0]:x[1], y[0]:y[1]], 0, 1)
         segmentation.texture.update_subimage(segmentation.data[x[0]:x[1], y[0]:y[1]], y[0], x[0])
@@ -4453,8 +4477,7 @@ class Camera3D:
         self.projection_matrix = np.eye(4)
         self.view_projection_matrix = np.eye(4)
         self.focus = np.zeros(3)
-        self.pitch = 0.0
-        self.yaw = 180.0
+        self.rotation = np.array([1.0, 0.0, 0.0, 0.0])  # orientation quaternion (w, x, y, z); identity == the old yaw=180 / pitch=0 view
         self.distance = 1120.0
         self.clip_near = 1e-1
         self.clip_far = 1e4
@@ -4468,21 +4491,120 @@ class Camera3D:
         self.update_projection_matrix()
 
     def cursor_delta_to_world_delta(self, cursor_delta):
-        self.yaw *= -1
-        camera_right = np.cross([0, 1, 0], self.get_forward())
-        camera_up = np.cross(camera_right, self.get_forward())
-        self.yaw *= -1
-        return cursor_delta[0] * camera_right + cursor_delta[1] * camera_up
+        return cursor_delta[0] * self.get_right() + cursor_delta[1] * self.get_up()
+
+    # --- quaternion helpers (w, x, y, z) ---
+    @staticmethod
+    def _quat_mul(a, b):
+        aw, ax, ay, az = a
+        bw, bx, by, bz = b
+        return np.array([
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        ])
+
+    @staticmethod
+    def _quat_conj(q):
+        return np.array([q[0], -q[1], -q[2], -q[3]])
+
+    @staticmethod
+    def _quat_normalize(q):
+        n = np.linalg.norm(q)
+        return q / n if n > 0 else np.array([1.0, 0.0, 0.0, 0.0])
+
+    @staticmethod
+    def _quat_from_axis_angle(axis, angle):
+        axis = np.asarray(axis, dtype=float)
+        n = np.linalg.norm(axis)
+        if n < 1e-9 or angle == 0.0:
+            return np.array([1.0, 0.0, 0.0, 0.0])
+        axis = axis / n
+        s = np.sin(angle * 0.5)
+        return np.array([np.cos(angle * 0.5), axis[0] * s, axis[1] * s, axis[2] * s])
+
+    @staticmethod
+    def _quat_to_matrix(q):
+        w, x, y, z = q
+        return np.array([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+            [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
+        ])
+
+    @staticmethod
+    def _matrix_to_quat(m):
+        t = m[0, 0] + m[1, 1] + m[2, 2]
+        if t > 0:
+            s = 0.5 / np.sqrt(t + 1.0)
+            w, x, y, z = 0.25 / s, (m[2, 1] - m[1, 2]) * s, (m[0, 2] - m[2, 0]) * s, (m[1, 0] - m[0, 1]) * s
+        elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2])
+            w, x, y, z = (m[2, 1] - m[1, 2]) / s, 0.25 * s, (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s
+        elif m[1, 1] > m[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2])
+            w, x, y, z = (m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s, 0.25 * s, (m[1, 2] + m[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1])
+            w, x, y, z = (m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s, (m[1, 2] + m[2, 1]) / s, 0.25 * s
+        return Camera3D._quat_normalize(np.array([w, x, y, z]))
+
+    # --- orientation accessors (columns of the camera->world rotation matrix) ---
+    def rotation_matrix(self):
+        return Camera3D._quat_to_matrix(self.rotation)
 
     def get_forward(self):
-        # Calculate the camera forward vector based on pitch and yaw
-        cos_pitch = np.cos(np.radians(self.pitch))
-        sin_pitch = np.sin(np.radians(self.pitch))
-        cos_yaw = np.cos(np.radians(self.yaw))
-        sin_yaw = np.sin(np.radians(self.yaw))
+        return self.rotation_matrix() @ np.array([0.0, 0.0, -1.0])  # camera looks along its own -Z
 
-        forward = np.array([-cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw])
-        return forward
+    def get_right(self):
+        return self.rotation_matrix() @ np.array([1.0, 0.0, 0.0])
+
+    def get_up(self):
+        return self.rotation_matrix() @ np.array([0.0, 1.0, 0.0])
+
+    @property
+    def yaw(self):
+        # azimuth in the old convention (180 at the start view), kept for the light coupling
+        f = self.get_forward()
+        return np.degrees(np.arctan2(-f[0], f[2]))
+
+    @property
+    def pitch(self):
+        f = self.get_forward()
+        return np.degrees(np.arcsin(np.clip(-f[1], -1.0, 1.0)))
+
+    def set_euler(self, yaw, pitch):
+        # Set an absolute yaw/pitch view (roll reset to 0); used by the Settings inputs.
+        yaw_r, pitch_r = np.radians(yaw), np.radians(pitch)
+        forward = Camera3D.normalize(np.array([-np.cos(pitch_r) * np.sin(yaw_r), -np.sin(pitch_r), np.cos(pitch_r) * np.cos(yaw_r)]))
+        right = Camera3D.normalize(np.cross(forward, np.array([0.0, 1.0, 0.0])))
+        up = np.cross(right, forward)
+        self.rotation = Camera3D._matrix_to_quat(np.column_stack([right, up, -forward]))
+
+    def rotate_world(self, axis, angle_deg):
+        # Rotate the camera about a world-space axis (left-multiply applies it in world frame).
+        q = Camera3D._quat_from_axis_angle(axis, np.radians(angle_deg))
+        self.rotation = Camera3D._quat_normalize(Camera3D._quat_mul(q, self.rotation))
+
+    def arcball_rotate(self, prev_cursor, cur_cursor, width, height, speed_deg):
+        # ChimeraX-style tumble driven by the per-frame cursor motion (delta-based, so it never runs
+        # out of travel the way absolute-position arcball does). Near the centre the motion turns the
+        # scene about in-plane axes; near the edges it rolls about the view axis. Axes are in camera
+        # space (right-multiply); conj makes the scene follow the cursor (drop it to invert).
+        mx = cur_cursor[0] - prev_cursor[0]
+        my = -(cur_cursor[1] - prev_cursor[1])  # screen y grows downward; flip to y-up
+        if mx == 0 and my == 0:
+            return
+        speed = np.radians(speed_deg)
+        r = 0.5 * min(width, height)
+        px = (cur_cursor[0] - width * 0.5) / r
+        py = (height * 0.5 - cur_cursor[1]) / r
+        edge = min(1.0, px * px + py * py)  # 0 at the centre -> 1 at the edges
+        q_inplane = Camera3D._quat_from_axis_angle([-my, mx, 0.0], np.hypot(mx, my) * speed * (1.0 - edge))
+        q_roll = Camera3D._quat_from_axis_angle([0.0, 0.0, 1.0], (mx * -py + my * px) * speed * edge)
+        q_delta = Camera3D._quat_mul(q_roll, q_inplane)
+        self.rotation = Camera3D._quat_normalize(Camera3D._quat_mul(self.rotation, Camera3D._quat_conj(q_delta)))
 
     @property
     def matrix(self):
@@ -4537,47 +4659,17 @@ class Camera3D:
         return projection_matrix
 
     def update_view_projection_matrix(self):
-        eye_position = self.calculate_relative_position(self.focus, self.pitch, self.yaw, self.distance)
-        self.view_matrix = self.create_look_at_matrix(eye_position, self.focus)
+        rot = self.rotation_matrix()
+        right, up, back = rot[:, 0], rot[:, 1], rot[:, 2]  # camera +X, +Y, +Z in world (back == -forward)
+        eye = self.focus + back * self.distance
+        view = np.eye(4)
+        view[0, :3], view[1, :3], view[2, :3] = right, up, back
+        view[0, 3], view[1, 3], view[2, 3] = -np.dot(right, eye), -np.dot(up, eye), -np.dot(back, eye)
+        self.view_matrix = view
         self.view_projection_matrix = self.projection_matrix @ self.view_matrix
 
     def get_view_direction(self):
-        eye_position = self.calculate_relative_position(self.focus, self.pitch, self.yaw, self.distance)
-        focus_position = np.array(self.focus)
-        view_dir = eye_position - focus_position
-        view_dir /= np.sum(view_dir**2)**0.5
-        return view_dir
-
-    @staticmethod
-    def calculate_relative_position(base_position, pitch, yaw, distance):
-        cos_pitch = np.cos(np.radians(pitch))
-        sin_pitch = np.sin(np.radians(pitch))
-        cos_yaw = np.cos(np.radians(yaw))
-        sin_yaw = np.sin(np.radians(yaw))
-
-        forward = np.array([
-            cos_pitch * sin_yaw,
-            sin_pitch,
-            -cos_pitch * cos_yaw
-        ])
-        forward = forward / np.linalg.norm(forward)
-
-        relative_position = base_position + forward * distance
-
-        return relative_position
-
-    @staticmethod
-    def create_look_at_matrix(eye, position):
-        forward = Camera3D.normalize(position - eye)
-        right = Camera3D.normalize(np.cross(forward, np.array([0, 1, 0])))
-        up = np.cross(right, forward)
-
-        look_at_matrix = np.eye(4)
-        look_at_matrix[0, :3] = right
-        look_at_matrix[1, :3] = up
-        look_at_matrix[2, :3] = -forward
-        look_at_matrix[:3, 3] = -np.dot(look_at_matrix[:3, :3], eye)
-        return look_at_matrix
+        return -self.get_forward()  # from the focus toward the eye
 
     @staticmethod
     def normalize(v):
