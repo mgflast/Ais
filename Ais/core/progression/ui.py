@@ -208,7 +208,7 @@ def _truncate_to_width(text: str, max_w: float) -> str:
 
 _XP_HUD_W = 280
 _XP_HUD_ROW_H = 28
-_XP_HUD_RECENT_WINDOW_S = 12.0
+_XP_HUD_RECENT_WINDOW_S = 60.0
 _XP_HUD_MAX_ROWS = 10
 
 
@@ -218,33 +218,28 @@ def render_xp_hud(window_width: int, window_height: int, hidden: bool = False) -
 
     p = _profile.get_profile()
 
+    # Keyed by canonical skill name, matching events/profile identity.
     active_names: List[str] = []
     color_overrides: dict = {}
     if cfg.se_active_frame is not None:
         seen = set()
         for f in cfg.se_active_frame.features:
-            if f.title in seen:
+            ck = _profile.canonical(f.title)
+            if ck in seen:
                 continue
-            seen.add(f.title)
-            active_names.append(f.title)
-            color_overrides[f.title] = tuple(f.colour)
+            seen.add(ck)
+            active_names.append(ck)
+            color_overrides[ck] = tuple(f.colour)
 
     recent = events.recent_features(_XP_HUD_RECENT_WINDOW_S)
 
+    # Only show features that recently gained XP; features that are merely present
+    # in the frame (existing annotations, no recent activity) are not listed.
     rows: List[Tuple[str, float, bool]] = []
-    placed = set()
     for name, dt in recent:
         if p.is_hidden(name):
             continue
         rows.append((name, dt, name in active_names))
-        placed.add(name)
-    for name in active_names:
-        if name in placed:
-            continue
-        if p.is_hidden(name):
-            continue
-        rows.append((name, 1e9, True))
-        placed.add(name)
 
     rows = rows[:_XP_HUD_MAX_ROWS]
     if not rows:
@@ -287,11 +282,11 @@ def render_xp_hud(window_width: int, window_height: int, hidden: bool = False) -
         row_top = win_pos[1] + 4 + i * _XP_HUD_ROW_H
         row_x = win_pos[0]
 
-        if in_frame:
-            row_alpha = 1.0
-        else:
-            fade_start = _XP_HUD_RECENT_WINDOW_S - 3.0
-            row_alpha = 1.0 if dt < fade_start else max(0.0, 1.0 - (dt - fade_start) / 3.0)
+        # Fade the row out toward the end of the recent-activity window. While a
+        # feature is actively annotated its dt keeps resetting, so it stays at full
+        # opacity; it only fades once XP gains stop.
+        fade_start = _XP_HUD_RECENT_WINDOW_S - 3.0
+        row_alpha = 1.0 if dt < fade_start else max(0.0, 1.0 - (dt - fade_start) / 3.0)
         if row_alpha <= 0.0:
             continue
 
@@ -314,7 +309,7 @@ def render_xp_hud(window_width: int, window_height: int, hidden: bool = False) -
 
         name_x = content_x
         name_max_w = lv_x - name_x - 8
-        name_text = _truncate_to_width(name, name_max_w)
+        name_text = _truncate_to_width(p.display_name(name), name_max_w)
         name_fg = (0.0, 0.0, 0.0)
         if gain_pulse > 0:
             name_fg = (
@@ -649,7 +644,7 @@ def _render_skill_rows(visible: dict, p: _profile.Profile) -> None:
         lv = f"Lv {L}"
         lv_tw, _ = imgui.calc_text_size(lv)
         lv_x = x0 + col_w - lv_tw - 20
-        name_text = _truncate_to_width(name, lv_x - text_x - 6)
+        name_text = _truncate_to_width(p.display_name(name), lv_x - text_x - 6)
         dl.add_text(text_x, y0 + 5, imgui.get_color_u32_rgba(*cfg.COLOUR_TEXT[:3], 1.0), name_text)
         lvl_col = _readable_accent(color, dark)
         dl.add_text(lv_x, y0 + 5, imgui.get_color_u32_rgba(lvl_col[0], lvl_col[1], lvl_col[2], 1.0), lv)

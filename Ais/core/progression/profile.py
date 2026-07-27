@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 PROFILE_DIR = Path(os.path.expanduser("~")) / ".Ais"
 PROFILE_PATH = PROFILE_DIR / "profile.json"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 LEVEL_CAP = 99
 XP_COST_SCALE = 1.5   # higher -> slower levelling
 
@@ -45,6 +45,14 @@ Color = Tuple[float, float, float]
 _DEFAULT_COLOR: Color = (0.55, 0.55, 0.60)
 
 
+def canonical(name: str) -> str:
+    # Skill identity is case-insensitive: "Microtubule" and "microtubule" are the
+    # same skill. Storage and lookups use this canonical key; the display casing is
+    # remembered separately in Profile.names so acronyms (NPC, TRiC, hfIMPDH) still
+    # render as the user typed them.
+    return name.casefold() if name else name
+
+
 def is_placeholder_skill(name: str) -> bool:
     # Placeholder feature/model names ("Unnamed feature 1", "Unnamed model") are
     # not real features - a user just hasn't named them yet. They are never
@@ -54,34 +62,47 @@ def is_placeholder_skill(name: str) -> bool:
 
 @dataclass
 class Profile:
+    # skills/colors/hidden are keyed by the canonical (casefolded) skill name;
+    # names maps that canonical key -> the display casing to render.
     skills: Dict[str, int] = field(default_factory=dict)
     colors: Dict[str, Color] = field(default_factory=dict)
+    names: Dict[str, str] = field(default_factory=dict)
     hidden: Set[str] = field(default_factory=set)
     equipped: Dict[str, str] = field(default_factory=dict)   # category -> cosmetic id
     created_at: float = 0.0
     schema_version: int = SCHEMA_VERSION
 
+    def register_name(self, name: str) -> str:
+        # Remember the display casing (most recent wins) and return the canonical key.
+        key = canonical(name)
+        if key:
+            self.names[key] = name
+        return key
+
+    def display_name(self, name: str) -> str:
+        return self.names.get(canonical(name), name)
+
     def skill_xp(self, name: str) -> int:
-        return self.skills.get(name, 0)
+        return self.skills.get(canonical(name), 0)
 
     def skill_level(self, name: str) -> int:
-        return level_for_xp(self.skills.get(name, 0))
+        return level_for_xp(self.skills.get(canonical(name), 0))
 
     def skill_color(self, name: str) -> Color:
-        c = self.colors.get(name)
+        c = self.colors.get(canonical(name))
         if c is None:
             return _DEFAULT_COLOR
         return (float(c[0]), float(c[1]), float(c[2]))
 
     def is_hidden(self, name: str) -> bool:
-        return name in self.hidden
+        return canonical(name) in self.hidden
 
     def hide(self, name: str) -> None:
-        if name in self.skills:
-            self.hidden.add(name)
+        if canonical(name) in self.skills:
+            self.hidden.add(canonical(name))
 
     def unhide(self, name: str) -> None:
-        self.hidden.discard(name)
+        self.hidden.discard(canonical(name))
 
     def visible_skills(self) -> Dict[str, int]:
         return {k: v for k, v in self.skills.items() if k not in self.hidden}
@@ -99,27 +120,46 @@ class Profile:
             "created_at": self.created_at,
             "skills": dict(self.skills),
             "colors": {k: [float(v[0]), float(v[1]), float(v[2])] for k, v in self.colors.items()},
+            "names": dict(self.names),
             "hidden": sorted(self.hidden),
             "equipped": dict(self.equipped),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "Profile":
-        raw_colors = data.get("colors", {}) or {}
-        colors: Dict[str, Color] = {}
-        for k, v in raw_colors.items():
+        # Fold every key to its canonical form. Profiles written before skill
+        # identity became case-insensitive may hold "Microtubule" and "microtubule"
+        # as separate entries; those are merged here (XP summed, one display casing).
+        skills: Dict[str, int] = {}
+        names: Dict[str, str] = {}
+        for k, v in (data.get("skills", {}) or {}).items():
+            ck = canonical(k)
             try:
-                colors[k] = (float(v[0]), float(v[1]), float(v[2]))
+                skills[ck] = skills.get(ck, 0) + int(v)
+            except Exception:
+                continue
+            names.setdefault(ck, k)   # first-seen casing as the fallback display
+
+        colors: Dict[str, Color] = {}
+        for k, v in (data.get("colors", {}) or {}).items():
+            try:
+                colors[canonical(k)] = (float(v[0]), float(v[1]), float(v[2]))
             except Exception:
                 pass
-        hidden_list = data.get("hidden", []) or []
+
+        # Explicit display names from a v3+ profile take precedence over inferred casing.
+        for ck, disp in (data.get("names", {}) or {}).items():
+            names[canonical(ck)] = disp
+
+        hidden = {canonical(k) for k in (data.get("hidden", []) or [])}
         return cls(
-            skills=dict(data.get("skills", {})),
+            skills=skills,
             colors=colors,
-            hidden=set(hidden_list),
+            names=names,
+            hidden=hidden,
             equipped=dict(data.get("equipped", {}) or {}),
             created_at=float(data.get("created_at", time.time())),
-            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
+            schema_version=SCHEMA_VERSION,
         )
 
 
