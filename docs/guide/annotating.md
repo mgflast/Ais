@@ -15,7 +15,7 @@ When annotating in Ais you do two things: you place **boxes** and you **draw** a
 
 The single most important thing: wherever you place a box, you must _unambiguously_ annotate your feature of interest. Suppose you're segmenting ribosomes, and a box in some region contains five of them — you must annotate all five, in a consistent manner. If you annotate four but miss the fifth, you are telling the network that those first four particles are ribosomes and the fifth is not. That is ambiguous, and it hurts learning.
 
-A second important thing: the shape in which you annotate is the shape the network learns to produce. You can place a simple dot on each ribosome, or outline it more precisely — choose whatever works best for your goal. For microtubules and filament tracing, for example, it can be useful to annotate not the full ~25 nm width of the filament but only the lumen. That way, microtubules in tightly packed bundles are still segmented as individual filaments (and you can always postprocess the label to cover the full width).
+A second important thing: the shape in which you annotate is the shape the network learns to produce. You can place a simple dot on each ribosome, or outline it more precisely — choose whatever works best for your goal. For microtubules and filament tracing, for example, it can be useful to annotate not the full ~25 nm width of the filament but only the lumen. That way, microtubules in tightly packed bundles are still segmented as individual filaments (and you can always postprocess the label to cover the full width). For ribosomes, I like to roughly annotate their whole shape. That way the resulting visualisations look a bit more realistic. But you can do whatever you like.
 
 ??? note "Positive and negative boxes"
     In earlier versions of Ais — and in our older tutorials — we drew a more explicit distinction between *positive* and *negative* boxes:
@@ -58,7 +58,7 @@ Turn on *flood* mode to use the active-contouring brush. Instead of tracing a fe
 <p style="text-align: center; font-style: italic; color: var(--md-default-fg-color--light); margin-top: 0.5em;">The active-contouring brush snapping to feature edges in flood mode.</p>
 
 !!! tip
-    The image **filters** (Gaussian, Sobel, invert, contrast, …) are for annotation only — the network just sees the original tomogram — but a filtered image can gives the active-contouring brush clearer edges to snap to. See [Filters & visualization](../features/filters.md).
+    The image **filters** (Gaussian, Sobel, invert, contrast, …) are for annotation only — the network just sees the original tomogram — but a filtered image can give the active-contouring brush clearer edges to snap to. See [Filters & display](../features/filters.md).
 
 ### Model-assisted annotation
 

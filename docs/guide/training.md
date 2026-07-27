@@ -1,6 +1,6 @@
 # Training a model
 
-Once you've [annotated](annotating.md) a bit of data, the next step is to turn those annotations into a training dataset and train a network on it. You can watch a model train live in the GUI, or do the training on a multi-GPU node with [`ais train`](../cli/train.md). You don't need a cluster to get started: consumer GPUs are fine — we often run Ais on a laptop (a Quadro P1000) — and you can even train and test models on the CPU alone, if a little slowly.
+Once you've [annotated](annotating.md) a bit of data, the next step is to turn those annotations into a training dataset and train a network on it. You can watch a model train live in the GUI, or do the training on a multi-GPU node with [`ais train`](../cli/reference.md#ais-train). You don't need a cluster to get started: consumer GPUs are fine — we often run Ais on a laptop (a Quadro P1000) — and you can even train and test models on the CPU alone, if a little slowly.
 
 <video controls muted loop autoplay playsinline width="100%">
   <source src="../../res/training_run.mp4" type="video/mp4">
@@ -9,7 +9,7 @@ Once you've [annotated](annotating.md) a bit of data, the next step is to turn t
 
 ## Exporting a training dataset
 
-After annotating, you first extract a training dataset. In the GUI this is **Create a training set** in the Models tab; on the command line it is [`ais extract`](../cli/extract.md). A training dataset is saved as a `.scnt` file. In older versions (before July 2026), this was really just a .tiff stack with some extra metadata. In current versions, `.scnt` files are uncompressed .tar archives that contain separate .mrc files for each of the training inputs and outputs.
+After annotating, you first extract a training dataset. In the GUI this is **Create a training set** in the Models tab; on the command line it is [`ais extract`](../cli/reference.md#ais-extract). A training dataset is saved as a `.scnt` file. In older versions (before July 2026), this was really just a .tiff stack with some extra metadata. In current versions, `.scnt` files are uncompressed .tar archives that contain separate .mrc files for each of the training inputs and outputs.
 
 You again specify a **box size** at this point. If you extract a larger box than you annotated, the un-annotated excess around the edges is given an *ignore* label during training — this is fine, nothing to worry about. If you extract smaller, a bit of your annotation effort simply goes to waste.
 
@@ -43,7 +43,7 @@ Training can be interrupted at any time, and you can continue training a saved m
 
 ## Training parameters
 
-The defaults are generally fine. In the training panel you can adjust the number of epochs, the batch size, and the number of augmented copies per input image used per epoch. See [`ais train`](../cli/train.md) for the full list of flags.
+The defaults are generally fine. In the training panel you can adjust the number of epochs, the batch size, and the number of augmented copies per input image used per epoch. See [`ais train`](../cli/reference.md#ais-train) for the full list of flags.
 
 ??? question "Epochs"
     How many times the network sees the whole dataset. ~25 is a good start. Too few and it underfits; too many and it may overfit — see [Assessing model performance](assessing_performance.md).
