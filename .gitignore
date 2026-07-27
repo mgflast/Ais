@@ -16,3 +16,6 @@ venv/
 
 # Ais runtime state
 imgui.ini
+
+# local Claude Code agent data
+.claude/
