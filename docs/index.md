@@ -2,23 +2,24 @@
 title: ""
 hide:
   - toc
+  - navigation
 ---
 
 ![Ais banner](res/ais_banner.png)
 
-<h2 style="text-align: center; font-weight: bold;">Fast and user-friendly segmentation of cryo-electron tomography data</h2>
-<h3 style="text-align: center; font-weight: bold; font-style: italic;">annotate, train, and apply convolutional neural networks</h3>
+<h2 style="text-align: center; font-weight: bold;">Streamlining tomogram segmentation</h2>
+<h3 style="text-align: center; font-weight: bold; font-style: italic;">annotate, train, and apply convolutional neural networks for visualization and particle picking</h3>
 
-**Ais** is a segmentation suite for cryo-electron tomography data that was designed to be fast, intuitive, and as easy to use as we could make it. Manually annotate a small section of your data, train a neural network in seconds, and apply it to segment entire datasets.
+**Ais** is segmentation software for cryoET that was designed to be fast, intuitive, easy, and fun to use. Manually annotate a small section of your data, train a neural network in as little as a minute, and apply the networks to segment your entire dataset, visualise, pick particles, or contextualize particle sets.
 
-<figure markdown="span">
-  ![An example of the segmentation interface in Ais](res/homepage.png){ .with-border }
-</figure>
+<video controls muted loop autoplay playsinline width="100%" style="margin-top: 1em;">
+  <source src="res/training_run.mp4" type="video/mp4">
+</video>
+<p style="text-align: center; font-style: italic; color: var(--md-default-fg-color--light); margin-top: 0.5em;">Train &amp; watch a model learn to segment your own data. Ais handles annotation, training, curation, batch segmentation, and particle picking.</p>
 
-Watch the [video introduction to Ais](https://www.youtube.com/watch?v=ES4tsIt-DCQ&list=PL_lGdEIRskGb5-vwuuGN9QJZxRvvl44Zd) on YouTube.
+<p style="text-align: center; font-weight: bold; margin-top: 3em;">Check out our other tools:</p>
 
-## Ais ecosystem
-This repository comprises a standalone version of Ais. For the version integrated into the correlative microscopy data processing suite **scNodes**, see the [scNodes](https://github.com/bionanopatterning/scNodes) repository. Trained models can be shared via the [Ais model repository](https://www.aiscryoet.org). Ais is also the foundation on which [easymode](https://mgflast.github.io/easymode/) - pretrained general networks for cellular cryoET - was built.
-
-!!! tip "Need help?"
-    Please post questions and bug reports on the [Ais GitHub issues page](https://github.com/mgflast/Ais/issues).
+<p align="center">
+  <a href="https://mgflast.github.io/easymode/"><img src="res/easymode_banner.png" width="49%"></a>
+  <a href="https://github.com/mgflast/Pom"><img src="res/pom_banner.png" width="49%"></a>
+</p>

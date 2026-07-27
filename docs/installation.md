@@ -1,6 +1,6 @@
 # Installation
 
-## Installing Ais via pip
+## Installing Ais
 
 Ais works on Windows and Linux systems, but not on macOS. To ensure Ais's requirements do not clash with other packages, we recommend creating a separate environment to install Ais in. Using anaconda prompt, for example, run:
 
@@ -9,7 +9,7 @@ conda create --name ais
 conda activate ais
 conda install python==3.9
 conda install pip
-pip install ais-cryoet
+pip install git+https://github.com/mgflast/Ais
 ```
 
 Run Ais with either of these commands:
@@ -33,7 +33,3 @@ When running Ais from within an IDE some paths may need to be manually specified
 ```
 LIBRARY_PATH=C:\Program Files\zlib123dllx64\dll_x64
 ```
-
-## Settings
-
-To be able to directly port 3D scenes into Blender or ChimeraX, the paths to the Blender and ChimeraX executables must be specified. These can be set via the main menu bar → Settings → 3rd party applications.

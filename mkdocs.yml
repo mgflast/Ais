@@ -3,40 +3,44 @@ site_url: https://mgflast.github.io/Ais/
 site_description: Fast and user-friendly segmentation of cryo-electron tomography data using convolutional neural networks.
 repo_name: mgflast/Ais
 repo_url: https://github.com/mgflast/Ais
-copyright: copyright © 2023 - 2025 Mart G. F. Last
+copyright: © Mart So-Last, 2026, mgflast@gmail.com
 nav:
-   - "🏠 Home": index.md
    - "📖 User Guide":
-       - installation.md
-       - "<b>Segmentation workflow</b>":
-          - "1. Annotation": annotation.md
-          - "2. Creating models": creating_models.md
-          - "3. Batch processing": batch_processing.md
-          - "4. Rendering": rendering.md
-          - "5. Extracting particles & meshes": extracting_particles_and_meshes.md
-       - "<b>Sharing</b>":
-          - "Sharing models": sharing_models.md
-       - "<b>Scripting</b>":
-          - "Command line interface": command_line_interface.md
-          - "Python module": python_module.md
+       - "⚙️ Installation": installation.md
+       - "<b>The Ais Workflow</b>":
+          - "1️⃣ Annotating training data": guide/annotating.md
+          - "2️⃣ Training a model": guide/training.md
+          - "3️⃣ Assessing model performance": guide/assessing_performance.md
+          - "4️⃣ Using a model": guide/using_a_model.md
+       - "<b>Additional software features</b>":
+          - "🔴 Filters & display": features/filters.md
+          - "🟠 Model-assisted annotation": features/model_assisted_annotation.md
+          - "🟡 The active-contouring brush": features/active_contouring.md
+          - "🟢 The feature library": features/feature_library.md
+          - "🔵 Model interactions": features/model_interactions.md
+          - "🟣 Linking Ais and Pom": features/pom.md
+          - "⚪️ Rendering & visualisation": features/rendering_export.md
+          - "🟤 Sharing models & the repository": features/sharing_models.md
+          - "⚫️ Custom model architectures": features/custom_architectures.md
+          - "🥳 Party mode": features/party_mode.md
+       - "Command reference": cli/reference.md
    - "🗄️ Model repository": https://www.aiscryoet.org
    - "🐞 Submit a bug": https://github.com/mgflast/Ais/issues
+   - "🐸 easymode": https://mgflast.github.io/easymode/
+   - "🤖 Pom": https://github.com/mgflast/Pom
 theme:
    name: material
-   logo: res/LOGO_Ais_1024.png
-   favicon: res/LOGO_Ais_1024.png
+   logo: res/ais_boot_sprite.png
+   favicon: res/ais_boot_sprite.png
    palette:
+      # Primary/accent colours are set to a custom #f09350 in styles/extra.css
       - media: "(prefers-color-scheme: light)"
         scheme: default
-        primary: deep orange
-        accent: deep orange
         toggle:
            icon: material/weather-night
            name: Switch to dark mode
       - media: "(prefers-color-scheme: dark)"
         scheme: slate
-        primary: deep orange
-        accent: deep orange
         toggle:
            icon: material/weather-sunny
            name: Switch to light mode
@@ -74,5 +78,7 @@ markdown_extensions:
       toc_depth: 5
 extra_css:
   - styles/extra.css
+extra_javascript:
+  - javascripts/home.js
 plugins:
   - search

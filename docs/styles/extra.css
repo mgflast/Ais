@@ -1,3 +1,79 @@
+/* Custom Ais theme colour (#f09350). Scoped to the colour-scheme attribute (not
+   :root) so these values override Material's default primary, which is defined at
+   the [data-md-color-primary] level and would otherwise win over :root.
+   The header text/icons are dark because #f09350 is a light orange. */
+[data-md-color-scheme="default"],
+[data-md-color-scheme="slate"] {
+    --md-primary-fg-color:        #f09350;
+    --md-primary-fg-color--light: #f4ab79;
+    --md-primary-fg-color--dark:  #d97b34;
+    /* Header text/icons are light because the header uses a dark image background */
+    --md-primary-bg-color:        rgba(255, 255, 255, 1);
+    --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
+    --md-accent-fg-color:         #d97b34;
+}
+
+/* Dark mode: force links and the active nav item to the theme orange. They read
+   --md-typeset-a-color, which Material resolves from its blue --md-primary-fg-color;
+   set it (and primary) to a literal here so it isn't the default blue in slate. */
+[data-md-color-scheme="slate"] {
+    --md-primary-fg-color:        #f09350;
+    --md-primary-fg-color--light: #f4ab79;
+    --md-primary-fg-color--dark:  #d97b34;
+    --md-typeset-a-color:         #f09350;
+}
+
+/* Text-selection highlight. Material leaves ::selection at the browser default,
+   which shows up blue in dark mode; force the theme orange in both schemes. */
+::selection {
+    background-color: rgba(240, 147, 80, 0.5);
+}
+
+/* Image background for the header (and the tabs bar below it). background-attachment:
+   fixed makes both bars show one continuous slice of the image. The dark gradient
+   overlay keeps the light header text/logo/search readable; the background-color is a
+   fallback if the image is unavailable. Swap the url() for any image in docs/res/. */
+.md-header,
+.md-tabs {
+    background-color: #14141a;
+    background-image: linear-gradient(rgba(18, 18, 20, 0.35), rgba(18, 18, 20, 0.35)),
+                      url("../res/ais_docs_header.png");
+    /* Anchor to the viewport and size to full width so the header bar and the tabs
+       bar show one continuous, seamless slice of the image (no repeat between them). */
+    background-size: 100% auto;
+    background-position: center top;
+    background-attachment: fixed;
+}
+
+/* Tighten the gap between the header logo and the site title */
+.md-header__button.md-logo {
+    padding-right: 0;
+    margin-right: 0;
+}
+.md-header__title {
+    margin-left: 0.2rem;
+}
+
+/* Push the tool links (the last two tabs) to the far right of the tabs bar */
+.md-tabs__list {
+    width: 100%;
+}
+.md-tabs__item:nth-last-child(2) {
+    margin-left: auto;
+}
+
+/* Hide the auto-injected page-title heading (the site name) on the home page */
+body.home .md-content__inner > h1:first-of-type {
+    display: none;
+}
+
+/* Narrower content column on the home page (where the nav sidebar is hidden) */
+body.home .md-content {
+    max-width: 42rem;
+    margin-left: auto;
+    margin-right: auto;
+}
+
 /* Make bold nav section headers darker */
 .md-nav__link b {
     color: var(--md-default-fg-color);
@@ -7,6 +83,24 @@
 /* Individual workflow items (3+ levels deep): smaller */
 .md-nav__item--nested .md-nav__item--nested .md-nav__item:not(.md-nav__item--nested) > .md-nav__link {
     font-size: 0.9em;
+}
+
+/* Markdown tables span the full text width, with tighter, more compact cells.
+   border-collapse: collapse + a per-row bottom border makes the horizontal rules
+   run continuously across the whole table (Material's default per-cell borders
+   otherwise stop short under narrow columns). */
+.md-typeset__table {
+    display: block;
+}
+.md-typeset table:not([class]) {
+    width: 100%;
+    border-collapse: collapse;
+}
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+    padding: 0.3em 0.9em;
+    border: none;
+    border-bottom: .05rem solid var(--md-default-fg-color--lightest);
 }
 
 /* Give figures a subtle border and center them */

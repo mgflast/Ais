@@ -1,9 +1,9 @@
 ![Ais](docs/res/ais_banner.png)
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/bionanopatterning/Ais/blob/master/Ais/LICENSE.txt)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/mgflast/Ais/blob/master/Ais/LICENSE.txt)
 [![Downloads](https://img.shields.io/pypi/dm/Ais-cryoET)](https://pypi.org/project/Ais-cryoET/)
 [![Documentation Status](https://readthedocs.org/projects/ais-cryoet/badge/?version=latest)](https://ais-cryoet.readthedocs.io/en/latest/?badge=latest)
-![Last Commit](https://img.shields.io/github/last-commit/bionanopatterning/Ais)
+![Last Commit](https://img.shields.io/github/last-commit/mgflast/Ais)
 
 # Segmentation with Ais #
 ## Fast and user-friendly annotation and segmentation of cryo-electron tomography data using convolutional neural networks ##
@@ -21,7 +21,7 @@ conda create --name ais
 conda activate ais
 conda install python==3.9
 conda install pip
-pip install git+https://github.com/bionanopatterning/Ais
+pip install git+https://github.com/mgflast/Ais
 ```
 
 Then run using either of the following commands:
@@ -70,7 +70,7 @@ After segmenting your data, you can visualize the results the Ais _rendering tab
 https://github.com/user-attachments/assets/12aa1ea4-38eb-465c-8443-72f863a9c0bd
 
 ### Connect Ais to a Pom database ###
-Ais integrates with [Pom](https://github.com/bionanopatterning/Pom), a tool to present large cryoET datasets as searchable databases. Use Pom to organise the data, and Ais to mine it.
+Ais integrates with [Pom](https://github.com/mgflast/Pom), a tool to present large cryoET datasets as searchable databases. Use Pom to organise the data, and Ais to mine it.
 
 https://github.com/user-attachments/assets/32febf3e-fcba-4850-81ca-c4140a84b9d8
 
@@ -80,11 +80,13 @@ If you're using Ais often, or are setting up a large new project where you plan 
 https://github.com/user-attachments/assets/7c8060ae-6a22-412e-b7d4-e5f430bf1524
 
 
-###  ###
+###  ###cat pom/sub 
 
 ## See our other tools ##
 
 <p align="center">
-  <a href="https://github.com/bionanopatterning/Pom"><img src="https://github.com/bionanopatterning/Pom/raw/main/docs/res/pom_banner.png" width="49%"></a>
+  <a href="https://github.com/mgflast/Pom"><img src="https://github.com/mgflast/Pom/raw/main/docs/res/pom_banner.png" width="49%"></a>
   <a href="https://github.com/mgflast/easymode"><img src="https://github.com/mgflast/easymode/raw/master/assets/easymode_banner.png" width="49%"></a>
 </p>
+
+Mart So-Last, 2026 | mgflast@gmail.com 
