@@ -136,6 +136,7 @@ class SegmentationEditor:
     POM_SYNCHRONIZE_TIMER = 0
 
     FORCE_SELECT_TAB = None
+    FORCE_SELECT_TAB_NEXT = None  # like FORCE_SELECT_TAB, but applied on the *next* frame. Needed when a tab switch is requested from within a tab's own content (e.g. 'copy output to annotation'), which runs after that frame's Annotation tab item has already been drawn.
 
     def __init__(self, window, imgui_context, imgui_impl):
         cfg.start_log()
@@ -1250,7 +1251,7 @@ class SegmentationEditor:
                                 if imgui.selectable(feature.title)[1]:
                                     slice_data = (m.data > m.threshold) * 255
                                     feature.set_slice_ndarray(slice_data, cfg.se_active_frame.current_slice)
-                                    SegmentationEditor.FORCE_SELECT_TAB = 0
+                                    SegmentationEditor.FORCE_SELECT_TAB_NEXT = 0  # deferred: we are inside the Models tab content, past this frame's Annotation tab item
                                     progression.award(skill=feature.title, xp=15, color=tuple(feature.colour), cursor_pos=(self.window.cursor_pos[0], self.window.cursor_pos[1]))
                                     progression.background_spawn(tuple(feature.colour), throttle=False, count=3)
                             imgui.pop_style_var(1)
@@ -2923,6 +2924,12 @@ class SegmentationEditor:
         shared_gui()
         imgui.spacing()
         imgui.spacing()
+
+        # a tab switch requested from inside a tab's content (e.g. 'copy output to annotation') can only take
+        # effect on the following frame, once the Annotation tab item is drawn again with FORCE_SELECT_TAB set.
+        if SegmentationEditor.FORCE_SELECT_TAB_NEXT is not None:
+            SegmentationEditor.FORCE_SELECT_TAB = SegmentationEditor.FORCE_SELECT_TAB_NEXT
+            SegmentationEditor.FORCE_SELECT_TAB_NEXT = None
 
         if imgui.begin_tab_bar("##tabs"):
             self.window.clear_color = cfg.COLOUR_WINDOW_BACKGROUND

@@ -103,6 +103,12 @@ body.home .md-content {
     border-bottom: .05rem solid var(--md-default-fg-color--lightest);
 }
 
+/* Keep the first (option/key) column of a table on one line, so option names read as
+   one wider column instead of wrapping. The table scrolls horizontally if it must. */
+.md-typeset table:not([class]) td:first-child {
+    white-space: nowrap;
+}
+
 /* Give figures a subtle border and center them */
 .with-border {
     border: 1px solid var(--md-default-fg-color--lightest);

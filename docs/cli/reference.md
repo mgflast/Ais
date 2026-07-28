@@ -1,10 +1,10 @@
 # Command reference
 
-Ais offers a command-line interface for the parts of the workflow that don't need the GUI: extracting training data, training, segmenting, and picking. Each of these is faster from the terminal than from the GUI, and easy to run on a cluster.
+Ais offers a command-line interface for the parts of the workflow that don't need the GUI: extracting training data, training, segmenting, and picking. These run faster from the terminal than from the GUI, and are easy to run on a cluster.
 
 ## `ais extract`
 
-Extract training data (`.scnt` files) from annotated tomograms (`.scns` files). This is the first step of the command-line workflow: turn the annotations you drew in the Ais GUI into training datasets that `ais train` can consume. A separate output file is created for each feature.
+Extract training data from annotated tomograms. Annotations you save in the GUI are stored as `.scns` files; `ais extract` reads those and writes `.scnt` training-data files — one per feature — that `ais train` consumes. You set the box size, depth, and binning of the extracted data here.
 
 ```
 ais extract -d <data_directory> -f <features...> [-ou <output_directory>] [-size <box_size>] [-depth <box_depth>] [-bin <binning>] [-e <exclude>] [-a <apix>] [--merge] [--coordinates]
@@ -14,65 +14,86 @@ ais extract -d <data_directory> -f <features...> [-ou <output_directory>] [-size
 
 | Option | Description |
 | --- | --- |
-| `-d`, `--data_directory` | Directory containing annotated tomograms (`.scns` files). **Required.** |
-| `-f`, `--features` | List of features to extract, e.g. `-f Membrane Ribosome Microtubule`. A separate output file is created for each feature. **Required.** |
-| `-ou`, `--output_directory` | Directory to save the extracted training data (`.scnt` files). Default: current directory. |
-| `-size`, `--box-size` | Box size (in pixels) to extract. When not specified, the box size is taken from the annotations. Default 128. |
-| `-depth`, `--box-depth` | Box depth (in Z) to extract. Default 1 (2D). Must be odd — if not odd, 1 is added. Use a value >1 for a 2.5D dataset. |
-| `-bin`, `--binning` | Binning factor to apply (in XY). Output box size will be `--box-size / --binning`. Default 1. |
-| `-e`, `--exclude` | Glob pattern or path to a `.txt` file listing volumes to exclude from the extracted dataset. |
-| `-a`, `--apix` | Override the pixel size found in the tomogram header and use this value instead. |
-| `--merge` | Combine all extracted data into a single output file per feature, rather than one file per input volume. |
-| `--coordinates` | Instead of exporting annotated training images, export just the box coordinates as a `.star` file. |
+| `-d`, `--data_directory` | Directory containing the annotated tomograms (`.scns` files). **Required.** |
+| `-f`, `--features` | Features to extract, e.g. `-f Membrane Ribosome Microtubule`. A separate output file is written for each. **Required.** |
+| `-ou`, `--output_directory` | Where to write the `.scnt` files. Default: current directory. |
+| `-size`, `--box-size` | Box size in pixels. Default 128; if omitted, the size stored in the annotations is used. |
+| `-depth`, `--box-depth` | Box depth in Z. Default 1 (2D). Must be odd (1 is added if not). Use a value >1 for a 2.5D dataset. |
+| `-bin`, `--binning` | Binning factor in XY. The output box size becomes `box-size / binning`. Default 1. |
+| `-e`, `--exclude` | Glob pattern, or a `.txt` file listing volumes to exclude from the dataset. |
+| `-a`, `--apix` | Override the pixel size in the tomogram header with this value. |
+| `--merge` | Write a single file per feature, pooling all input volumes, instead of one file per volume. |
+| `--coordinates` | Export just the box coordinates as a `.star` file, rather than the training images. |
 
 ### Examples
 
 ```
-ais extract -d annotations -f Microtubule -ou training_data -size 64
-ais extract -d annotations -f Membrane Ribosome -ou training_data -depth 5 --merge
+ais extract -d warp_tiltseries/reconstruction/denoised -f Membrane -ou training_data
+ais extract -d warp_tiltseries/reconstruction/denoised -f Membrane Ribosome -depth 5 --merge -ou training_data
 ```
+
+The first command writes `training_data/128x128x1_Membrane.scnt` (the filename is `<box>x<box>x<depth>_<feature>.scnt`). The second writes one merged file per feature, e.g. `128x128x5_Membrane.scnt` and `128x128x5_Ribosome.scnt`.
 
 ## `ais train`
 
-Train a segmentation network on one or more training datasets (`.scnt` files, produced by [`ais extract`](#ais-extract)). The trained model is saved as an `.scnm` file.
+Train a segmentation network on one or more training datasets (`.scnt` files from [`ais extract`](#ais-extract)). The trained model is saved as an `.scnm` file.
 
 ```
-ais train -t <training_data...> -ou <output_directory> -gpu <gpu_ids> [-a <architecture>] [-m <model_path>] [-e <epochs>] [-b <batch_size>] [-c <copies>] [-r <rate>] [-n <negatives>] [-p <parallel>] [-augment] [-name <model_name>] [-models]
+ais train -t <training_data...> -ou <output_directory> -gpu <gpu_ids> -a <architecture> [-name <model_name>] [-e <epochs>] [-b <batch_size>] [-c <copies>] [-r <rate>] [-m <model_path>] [-augment] [-models]
 ```
 
 ### Options
 
 | Option | Description |
 | --- | --- |
-| `-t`, `--training_data` | Path(s) to the training data (`.scnt`) file(s). Multiple files may be given, e.g. `-t a.scnt b.scnt`; their samples are pooled during training. All files must share the same box size and depth. |
+| `-t`, `--training_data` | Path(s) to the `.scnt` file(s). Several may be given (`-t a.scnt b.scnt`); their samples are pooled. All must share the same box size and depth. |
 | `-ou`, `--output_directory` | Directory to save the model in. Default: current directory. |
-| `-gpu`, `--gpus` | Comma-separated list of GPU IDs to use, e.g. `0,1,4,5`. Default `0`. |
-| `-a`, `--model_architecture` | Integer index of which model architecture to use. Use `-models` for a list of available architectures. |
-| `-m`, `--model_path` | Path to a previously saved model (`.scnm`) to continue training. Overrides `-a`. |
-| `-e`, `--epochs` | Number of epochs to train for. Default 50. |
-| `-b`, `--batch_size` | Batch size to use during training. Default 32. |
-| `-c`, `--copies` | Number of augmented versions of each input image to include (all in different orientations). Default 8 (the eight permutations of 90° rotations + horizontal flips). A value >8 adds randomly rotated versions. For 2.5D data, values 8–16 also include a flip in Z. |
-| `-r`, `--rate` | Learning rate. Default 1e-3. All default Ais networks use Adam as the optimizer. |
-| `-n`, `--negatives` | If 0.0 (default), all images are weighted identically. Otherwise, sets the ratio of negative to positive samples (some negatives are sampled more than once to reach the ratio). |
-| `-p`, `--parallel` | `1` (default) or `0`: whether to use TensorFlow's `distribute.MirroredStrategy()` across multiple GPUs, or a single process using all GPUs. |
-| `-augment` | If set, use extra scaling, contrast, brightness, and blurring augmentations. |
-| `-name`, `--model_name` | Model name. File is saved as `output_directory/{name}.scnm`. |
-| `-models`, `--model_architectures` | List available model architectures and their `-a` indices, then exit. |
+| `-gpu`, `--gpus` | Comma-separated GPU IDs, e.g. `0,1,2,3`. Default `0`. |
+| `-a`, `--model_architecture` | Which architecture to train — its index **or** its title, e.g. `13` or `'VGGNet M'`. Run `ais train -models` for the list. |
+| `-name`, `--model_name` | Model name. Saved as `output_directory/{name}.scnm`. |
+| `-e`, `--epochs` | Number of epochs. Default 50. |
+| `-b`, `--batch_size` | Batch size. Default 32. |
+| `-c`, `--copies` | Augmented copies of each input image, in different orientations. Default 8 (the eight 90°-rotation + flip permutations); a value >8 adds randomly rotated copies; for 2.5D data, 8–16 also flip in Z. |
+| `-r`, `--rate` | Learning rate. Default 1e-3 (Adam). |
+| `-m`, `--model_path` | Continue training from a saved `.scnm`. Overrides `-a`. |
+| `-augment` | Add extra augmentations (see the note below). |
+| `-models`, `--model_architectures` | List the available architectures and their `-a` indices, then exit. |
+
+!!! note "`-augment`"
+    `-augment` adds scaling, contrast, brightness, and blurring augmentations on top of the default orientation augmentations. They are off by default, and you don't need them — but for a model that generalises a little better they can help. It takes some experimentation: train once without and once with, compare the two on your data, and keep whichever does better.
 
 ### Examples
 
+List the architectures and their indices:
+
 ```
-ais train -models
-ais train -t training_data/Microtubule.scnt -ou models -gpu 0,1,2,3 -a 5 -e 25 -name Microtubule
-ais train -m models/Microtubule.scnm -t training_data/Microtubule_extra.scnt -ou models -gpu 0 -name Microtubule
+$ ais train -models
+index: 0 (-a 0)    ezm-2d-dice
+index: 1 (-a 1)    ezm-2d-bxe
+...
+index: 13 (-a 13)  VGGNet M
+index: 14 (-a 14)  VGGNet S
+...
+```
+
+Simplest case — point at the training data, name it, pick an architecture and GPUs:
+
+```
+ais train -t training_data/128x128x1_Membrane.scnt -name Membrane -ou models -gpu 0,1,2,3 -a 'VGGNet M'
+```
+
+With more settings — a lower learning rate, more epochs, and the extra augmentations:
+
+```
+ais train -t training_data/128x128x1_Membrane.scnt -name Membrane -ou models -gpu 0,1,2,3 -a 13 -e 100 -r 1e-4 -augment
 ```
 
 ## `ais segment`
 
-Apply a trained model (`.scnm`) to segment `.mrc` volumes without the GUI. Output segmentation `.mrc` files have the same shape as the input tomograms.
+Apply a trained model (`.scnm`) to segment `.mrc` volumes without the GUI.
 
 ```
-ais segment -m <model_path> -d <data...> -ou <output_directory> -gpu <gpu_ids> [-tta <n>] [-p <parallel>] [-overwrite <0|1>] [-apix <apix>] [-sigma <z y x>] [--batch <n>] [--workers <n>] [--center <percent>]
+ais segment -m <model_path> -d <data...> -ou <output_directory> -gpu <gpu_ids> [-tta <n>] [-overwrite <0|1>] [-apix <apix>] [-sigma <z y x>] [--batch <n>] [--workers <n>] [--center <percent>]
 ```
 
 ### Options
@@ -80,77 +101,77 @@ ais segment -m <model_path> -d <data...> -ou <output_directory> -gpu <gpu_ids> [
 | Option | Description |
 | --- | --- |
 | `-m`, `--model_path` | Path to the model file (`.scnm`). **Required.** |
-| `-d`, `--data` | One or more directories, file paths, or glob patterns for `.mrc` files. Examples: `/data/volumes`, `volumes/035*.mrc volumes/036*.mrc`, or explicit files. **Required.** |
+| `-d`, `--data` | One or more directories, files, or glob patterns for `.mrc` files, e.g. `/data/volumes`, `volumes/035*.mrc volumes/036*.mrc`. **Required.** |
 | `-ou`, `--output_directory` | Directory to save the output. **Required.** |
-| `-gpu`, `--gpus` | Comma-separated list of GPU IDs, e.g. `0,1,3,4`. **Required.** |
-| `-tta`, `--test-time-augmentation` | Integer 1–8. If 1 (default), no test-time augmentation. If 2–8, differently oriented copies of the input are segmented and averaged; orientations are `[0, 90, 180, 270, 0*, 90*, 180*, 270*]` (`*` = horizontal flip). |
-| `-p`, `--parallel` | `1` (default) or `0`: launch multiple parallel processes using one GPU each, or a single process using all GPUs. |
-| `-overwrite` | If `1`, tomograms with an existing segmentation in the output directory are skipped. Default 0. |
-| `-apix`, `--processing_apix` | Override the model's trained scale (Å/px) and process at this value. |
-| `-sigma`, `--postprocessing-blur-sigma` | Gaussian postprocessing sigma (Å): a single value (isotropic) or three (z y x). Default: no blur. |
-| `--batch` | Number of slices to batch per inference call. Default 1. Increase for faster inference if GPU memory allows. |
-| `--workers` | CPU worker threads per GPU for pre/postprocessing. Default: `cpu_count / n_gpus`. |
-| `--center` | Percentage of the volume depth (Z) to segment, centred on the middle. E.g. `--center 50` segments only the central 50%. Default 100. |
+| `-gpu`, `--gpus` | Comma-separated GPU IDs, e.g. `0,1,3,4`. **Required.** |
+| `-tta`, `--test-time-augmentation` | Integer 1–8. If 1 (default), no test-time augmentation. If 2–8, differently oriented copies of the input are segmented and averaged (`[0, 90, 180, 270, 0*, 90*, 180*, 270*]`, `*` = horizontal flip). |
+| `-overwrite` | If `1`, skip tomograms that already have a segmentation in the output directory. Default 0. See [Running on multiple nodes](#running-on-multiple-nodes). |
+| `-apix`, `--processing_apix` | Process at this pixel size (Å/px) instead of the model's trained scale. Only needed when the pixel size in the `.mrc` header is wrong. |
+| `-sigma`, `--postprocessing-blur-sigma` | Gaussian blur applied to the output (Å); one value or three (z y x). Off by default, and usually best left off — you can blur later without re-segmenting. |
+| `--batch` | Slices per inference call. Default 1. You rarely need to change this. |
+| `--workers` | CPU worker threads per GPU. Default: `cpu_count / n_gpus`. You rarely need to change this. |
+| `--center` | Percentage of the volume depth (Z) to segment, centred on the middle. E.g. `--center 50` segments only the central half. Default 100. |
 
-### Multi-GPU segmentation
+### Running on multiple nodes
 
-On systems with multiple GPUs, segmenting several volumes at once with parallel single-GPU processes (`-p 1`) is usually much faster than one process using all GPUs.
+You can launch several `ais segment` commands against the same output directory at once — even from different nodes — and the work is distributed automatically. Each GPU claims a tomogram by writing a small placeholder `.mrc` before it starts, so no two processes pick up the same volume, and `-overwrite 0` (the default) means volumes that already have an output are skipped.
 
-You can also launch several `ais segment` commands against the same directory concurrently — the workload is distributed automatically, so every process contributes to the same job. Occasionally a few tiny placeholder `.mrc` files (e.g. 10×10×10, a few kB) are left behind; these can be safely deleted.
+If a process crashes, its placeholder can be left behind. The tomogram then looks segmented — there is an output file — but the file is tiny and empty. Delete such placeholders by hand and re-run to segment those volumes properly.
 
 ### Output filenames
 
-Ais, Pom, and easymode use a fixed filename convention to link segmentations back to their tomograms. For a tomogram `tomo_001.mrc` segmented with a model titled `ribosome`, the output is `tomo_001__ribosome.mrc` — that is, `<tomogram>` + `__` (double underscore) + `<model>` + `.mrc`. Thanks to this, the Render tab in the GUI automatically finds and displays the segmentations belonging to a tomogram.
+Ais, Pom, and easymode name a segmentation `<tomogram>__<model>.mrc` (double underscore) — for a tomogram `tomo_001.mrc` segmented with a model titled `ribosome`, the output is `tomo_001__ribosome.mrc`. The Render tab uses this convention to find the segmentations belonging to a tomogram automatically.
 
 ### Examples
 
 ```
-ais segment -m models/Membrane.scnm -d volumes -ou segmentations -gpu 0,1,2,3,4,5,6,7
-ais segment -m models/Microtubule.scnm -d "volumes/TS_001*.mrc" -ou segmentations -gpu 0,1 -tta 4 -overwrite 1
+ais segment -m models/Membrane.scnm -d warp_tiltseries/reconstruction/denoised -ou segmentations -gpu 0,1,2,3,4,5,6,7
+ais segment -m models/Microtubule.scnm -d "warp_tiltseries/reconstruction/denoised/TS_001*.mrc" -ou segmentations -gpu 0,1 -tta 4 -overwrite 1
 ```
 
 ## `ais pick`
 
-Turn segmented volumes into particle coordinates. `ais pick` finds local maxima in the segmentation `.mrc` files produced by [`ais segment`](#ais-segment) and writes RELION-style `.star` coordinate files.
+Turn segmented volumes into particle coordinates. `ais pick` reads the segmentation `.mrc` files produced by [`ais segment`](#ais-segment) and writes RELION-style `.star` coordinate files. It has two modes: **blob** (the default, for compact particles) and **filament** (`-filament`, for filaments such as microtubules).
 
 ```
-ais pick -d <data_directory> -t <target> [-ou <output_directory>] [-threshold <v>] [-spacing <A>] [-size <A^3>] [-m <margin>] [-b <binning>] [-p <parallel>] [-filament] [-centroid] [-orient <mode>] ...
+ais pick -d <data_directory> -t <target> [-ou <output_directory>] [-threshold <v>] [-spacing <A>] [-size <A^3>] [-m <margin>] [-b <binning>] [-p <n>] [--subset <file>] [blob / filament options]
 ```
 
 ### Options
 
 | Option | Description |
 | --- | --- |
-| `-d`, `--data_directory` | Directory containing input segmentation `.mrc` files, e.g. `/segmented/`. **Required.** |
-| `-t`, `--target` | Feature to pick. If segmented volumes are named `<tomo>__Ribosome.mrc`, then `-t Ribosome` selects them. **Required.** |
-| `-ou`, `--output_directory` | Directory to save coordinate files. If empty, saves to the input directory. |
-| `-threshold` | Threshold applied to volumes before finding local maxima. Default 128. |
-| `-spacing` / `-spacing-px` | Minimum distance between particles, in Ångström (`-spacing`) or voxels (`-spacing-px`). |
-| `-size` / `-size-px` | Minimum particle size, in cubic Ångström (`-size`) or voxels (`-size-px`). |
+| `-d`, `--data_directory` | Directory of input segmentation `.mrc` files. **Required.** |
+| `-t`, `--target` | Feature to pick. For volumes named `<tomo>__Ribosome.mrc`, `-t Ribosome` selects them. **Required.** |
+| `-ou`, `--output_directory` | Where to save the `.star` files. Default: the input directory. |
+| `-threshold` | Threshold applied before finding maxima. Default 128 (Ais volumes are 0–255). |
+| `-spacing`, `-spacing-px` | Minimum distance between particles, in Ångström (`-spacing`) or voxels (`-spacing-px`). |
+| `-size`, `-size-px` | Minimum particle size, in cubic Ångström (`-size`) or voxels (`-size-px`). |
 | `-m`, `--margin` | Margin (px) to avoid picking near tomogram edges. Default 16. |
-| `-b`, `--binning` | Binning factor applied before processing (faster, possibly less accurate). Default 1. |
-| `-min-particles` | Minimum number of particles required in a tomogram for the `.star` file to be saved. Default 0. |
+| `-b`, `--binning` | Binning applied before processing (faster, less precise). Default 1. |
+| `-min-particles` | Minimum particles a tomogram must yield for its `.star` file to be written. Default 0. |
 | `-p`, `--parallel` | Number of parallel picking processes, e.g. `-p 64`. Default 1. |
+| `--subset` | A `.txt` file listing tomogram names, one per line (e.g. a [Pom](../features/pom.md) subset). Only matching volumes are picked. |
+| `-v`, `--verbose` | Verbose output (`1` or `0`). Default 0. |
 
-#### Blob vs filament mode
+#### Blob mode (default)
 
-| Option | Description |
-| --- | --- |
-| `-centroid` | Blob mode: place coordinates at the centroid of each connected component rather than the deepest point. Only use when particles are well separated. |
-| `-orient` | In centroid mode, also write Euler angles from each blob's shape: `normal` (disk normal / smallest principal axis) or `long-axis` (rod axis / largest principal axis). Sets `rlnAngleTilt` and `rlnAnglePsi`. |
-| `-orient-sign` | Convention for resolving the axis sign: `z` (force +z, default), `center`, or `out`. |
-| `-filament` | Pick in filament mode rather than blob mode. |
-| `--twist` | In filament mode, increment `rlnAngleRot` by this amount for each particle along a filament. |
-| `-length` / `-length-px` | In filament mode, minimum filament length to place coordinates along, in Ångström or pixels. Default 500 Å. |
-
-#### Pom integration
+Each connected component becomes one coordinate, placed at its deepest (highest-value) point.
 
 | Option | Description |
 | --- | --- |
-| `-capp`, `--pom-capp-config` | A [Pom](https://github.com/mgflast/Pom) context-aware particle-picking configuration file (optional). |
-| `--subset` | Path to a `.txt` file listing tomogram names/paths (e.g. a Pom subset file). Only matching volumes are picked. |
+| `-centroid` | Place coordinates at each component's centroid instead of its deepest point. Use only when particles are well separated. |
+| `-orient` | With `-centroid`, also write Euler angles from each blob's shape: `normal` (disk normal / smallest principal axis) or `long-axis` (rod axis / largest principal axis). Sets `rlnAngleTilt` and `rlnAnglePsi`. |
+| `-orient-sign` | How to resolve the axis sign: `z` (force +z, default), `center`, or `out`. |
 
-When picking coordinates from Ais-generated volumes, voxel values are 0–255 and 128 is a good default threshold. Use the Ais 3D renderer to test which threshold, spacing, and size values work well for your target.
+#### Filament mode (`-filament`)
+
+Coordinates are placed evenly along filaments rather than at blobs.
+
+| Option | Description |
+| --- | --- |
+| `-length`, `-length-px` | Minimum filament length to place coordinates along, in Ångström (`-length`) or pixels (`-length-px`). Default 500 Å. |
+| `--twist` | Increment `rlnAngleRot` by this amount for each particle along a filament. |
 
 ### Examples
 
@@ -158,3 +179,5 @@ When picking coordinates from Ais-generated volumes, voxel values are 0–255 an
 ais pick -d segmentations -t Ribosome -ou coordinates -threshold 128 -spacing 250 -size 1000000 -p 64
 ais pick -d segmentations -t Microtubule -ou coordinates -filament -length 800 -spacing 82
 ```
+
+When picking from Ais volumes, values are 0–255 and 128 is a good default threshold. Use the Ais 3D renderer to find the threshold, spacing, and size values that work for your target.

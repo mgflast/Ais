@@ -86,19 +86,16 @@ def main():
     pick_parser.add_argument('-length-px', required=False, type=float, default=None, help="Minimum filament length to place coordinates along (in pixels). Only used if -filament flag is set.")
     pick_parser.add_argument('-p', '--parallel', required=False, type=int, default=1, help="Number of parallel picking processes to use (e.g. ``-p 64``, or however many threads your system can run at a time).")
     pick_parser.add_argument('-v', '--verbose', required=False, type=int, default=0, help="Verbose (1 or 0)")
-    pick_parser.add_argument('-capp', '--pom-capp-config', required=False, type=str, default="", help="A Pom context-aware particle picking configuration file (optional).")
     pick_parser.add_argument('--subset', required=False, type=str, default=None, help="Path to a .txt file listing tomogram names or paths (one per line), e.g. a Pom subset file. Only segmented volumes matching these tomograms will be picked.")
 
     train_parser = subparsers.add_parser('train', help='Train a model.')
-    train_parser.add_argument('-a', '--model_architecture', required=False, type=int, help="Integer, index of which model architecture to use. Use -models for a list of available architectures.")
+    train_parser.add_argument('-a', '--model_architecture', required=False, type=str, default=None, help="Which model architecture to use, either as an integer index or as a model title (e.g. 13 or 'VGGNet M'). Use -models for a list of available architectures.")
     train_parser.add_argument('-m', '--model_path', required=False, type=str, default='', help="(Optional) path to a previously saved model to continue training. Overrides -a argument.")
     train_parser.add_argument('-t', '--training_data', required=False, type=str, nargs='+', help="Path(s) to the training data (.scnt) file(s). Multiple files may be given, e.g. '-t a.scnt b.scnt'; their samples are pooled during training. All files must share the same box size and depth.")
     train_parser.add_argument('-ou', '--output_directory', required=False, type=str, default='.', help="Directory to save the output")
     train_parser.add_argument('-gpu', '--gpus', required=False, default="0", type=str, help="Comma-separated list of GPU IDs to use (e.g., 0,1,4,5)")
-    train_parser.add_argument('-p', '--parallel', required=False, type=int, default=1, help="Integer 1 (default) or 0: whether to use TensorFlow's distribute.MirroredStrategy() for training in parallel on multiple GPUs, or a single process using all GPUs.")
     train_parser.add_argument('-e', '--epochs', required=False, type=int, default=50, help="Number of epochs to train the model for (default: 50).")
     train_parser.add_argument('-b', '--batch_size', required=False, type=int, default=32, help="Batch size to use during training (default: 32).")
-    train_parser.add_argument('-n', '--negatives', required=False, type=float, default=0.0, help="If 0.0 (default), all images in the input training data are weighted identically. If argument supplied, the value determines the ratio of negative to positive samples to use. For example: if the training data contains 50 positive samples and 50 negatives, and the negative to positive ratio is 1.5, a number of negatives will be sampled twice in order to reach this ratio.") # TODO: maybe remove this altogether
     train_parser.add_argument('-c', '--copies', required=False, type=int, default=8, help="Number of augmented versions of the input images to include in the training data (all samples in different orientations). Default 8 (which would be the eight permutations of 90 degree rotations + horizontal flips; An argument >8 would include randomly rotated versions of the input images). If training data is 2.5D, augmentations 8 - 16 also include a flip in Z.")
     train_parser.add_argument('-r', '--rate', required=False, type=float, default=1e-3,help="Learning rate (default 1e-3)")
     train_parser.add_argument('-augment', required=False, action='store_true', help="If set, use extra scaling, contrast, brightness, and blurring augmentations.")
@@ -179,7 +176,6 @@ def main():
                                           spacing_px=args.spacing_px,
                                           size_px=args.size_px,
                                           verbose=args.verbose==1,
-                                          pom_capp_config=args.pom_capp_config,
                                           filament=args.filament,
                                           twist_per_sample=args.twist,
                                           filament_length=args.length,
@@ -198,11 +194,9 @@ def main():
                                    architecture=args.model_architecture,
                                    epochs=args.epochs,
                                    batch_size=args.batch_size,
-                                   negatives=args.negatives,
                                    copies=args.copies,
                                    model_path=args.model_path,
                                    gpus=args.gpus,
-                                   parallel=args.parallel,
                                    rate=args.rate,
                                    name=args.model_name,
                                    extra_augmentations=args.augment)

@@ -1,4 +1,4 @@
-# Sharing models & the repository
+# Sharing models
 
 !!! note "Under construction"
     This page is a placeholder — content coming soon.

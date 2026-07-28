@@ -19,9 +19,25 @@ For large scale automated visualisation, use [Pom](https://github.com/mgflast/Po
 
 ## Picking particles
 
-Turn segmentations into particle coordinates with [`ais pick`](../cli/reference.md#ais-pick). 
+Once you have segmentations, you turn them into particle coordinates. Small jobs run in the GUI; whole datasets run from the command line.
 
-<!-- Picking: to be expanded — write more about the picking workflow here. -->
+### In the GUI
+
+Open a tomogram and switch to the **Render** tab (`4`). Ais loads the segmentations belonging to that tomogram automatically, matching them by filename: a `Ribosome` segmentation of tomogram `TS_001` is expected at `TS_001__Ribosome.mrc`. If yours live elsewhere, point Ais at that directory.
+
+Right-click a feature's panel to open its picking menu, set the **minimum particle spacing**, and start. Picking is watershed-based: the segmentation is split into connected regions, and each region becomes one coordinate.
+
+<img src="../../res/picking_1.png" width="100%">
+<p style="text-align: center; font-style: italic; color: var(--md-default-fg-color--light); margin-top: 0.5em;">The picking menu, open on the Ribosomes feature. Each region found becomes a coordinate, marked here with a dot.</p>
+
+Globular particles — ribosomes, pores — pick predictably. Irregular or loosely separated shapes are harder: set the spacing too low and a single particle splits into several.
+
+!!! tip
+    Tune the spacing on one tomogram first. Once it looks right, apply the same value across the batch.
+
+### On a cluster
+
+For whole datasets, use [`ais pick`](../cli/reference.md#ais-pick) from the command line. It reads the segmentation `.mrc` files and writes RELION-style `.star` coordinate files, with a **blob** mode for compact particles and a **filament** mode for filaments such as microtubules. The command reference has the options.
 
 ## Need help?
 I (Mart) would be happy to think along and help troubleshoot your workflow. In my experience, segmentation can be a super powerful way to get around large datasets and work through picking problems. But with cryoET being such a fragmented software landscape, it can be difficult to figure out exactly which other tools you'll need and how to string together a workflow out of separate bits of software. Maybe the subtomogram averaging and picking tutorials in the [easymode user guide](https://mgflast.github.io/easymode/) can be of help. If you've already looked at those and still want some input, just [post an issue](https://github.com/mgflast/Ais/issues) on GitHub.

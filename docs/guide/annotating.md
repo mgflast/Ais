@@ -40,6 +40,11 @@ Achieving good output in machine learning is very iterative. The alternative —
 
     The second most important thing is the box size you use during training. A network with a large receptive field, trained on a small box, will not be able to use all of the context it is built to see. In general, *a big box is better*, but the annotation cost per box does of course go up. For fine grained features like ribosomes, membranes, microtubules, nucleosomes, etc., start with a box size of 100 to 150 nm; if you're working at 10 A/px, 128 pixel boxes are good. For larger things like entire mitochondria or vesicles, use a box size of around 500 nm. At 10 A/px, that'd be a 512 pixel box, which is a bit much for training (training is slower for larger boxes). That's why you can bin the training data when you export it. For mitochondria, we would annotate a 512 pixel box in our 10 A/px tomograms and then during export (`ais extract -f mitochondrion -size 512 -bin 5`) bin the images down to 50 A/px. Training and inference are then done at 50 A/px, which will end up being very fast.
 
+??? tip "Difficult feature? A small annotated box is enough"
+    Some features are simply awkward to annotate — an intricate or convoluted shape that would take a long time to trace across a full-size box. You don't have to. Place a *smaller* box — 32 or 64 pixels, or whatever area you are comfortable annotating completely — around just a patch of the feature, even when the rest of your boxes are the usual larger size.
+
+    On export, Ais pads that box out to the training box size with **ignore** labels around the edge: pixels that are neither foreground nor background and are simply skipped when the training loss is computed. The network still learns from the small region you _did_ annotate, while your other, full-size boxes contribute as normal. A lot of ignored border is completely fine — it costs you nothing, and it saves you from having to perfectly annotate a large, complicated area.
+
 ??? question "Should I place many overlapping boxes?"
     No. Overlapping boxes do not provide much new information for training. Convolutional neural networks are, in principle, translation invariant, so translational jitter in the boxes is not very important. A little overlap does not hurt performance — but there is no benefit to piling boxes on top of one another.
 
@@ -59,6 +64,8 @@ Turn on *flood* mode to use the active-contouring brush. Instead of tracing a fe
 
 !!! tip
     The image **filters** (Gaussian, Sobel, invert, contrast, …) are for annotation only — the network just sees the original tomogram — but a filtered image can give the active-contouring brush clearer edges to snap to. See [Filters & display](../features/filters.md).
+
+See [The active-contouring brush](../features/active_contouring.md) for more.
 
 ### Model-assisted annotation
 

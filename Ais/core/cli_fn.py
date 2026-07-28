@@ -359,8 +359,43 @@ def print_available_model_architectures():
         print(f"{first_col[j]:<{col_width}}architecture name: {key}")
 
 
+def resolve_model_architecture(architecture):
+    # Resolve the -a / --model_architecture argument (an integer index OR a model title) to the
+    # integer index into SEModel.AVAILABLE_MODELS that the rest of the code expects.
+    # Returns None for None (keeps the default-architecture behaviour). Exits non-zero if it can't resolve.
+    if architecture is None:
+        return None
+    if not SEModel.MODELS_LOADED:
+        SEModel.load_models()
+    n = len(SEModel.AVAILABLE_MODELS)
+
+    # an integer index (either an int or an all-digit string)
+    if isinstance(architecture, int) or (isinstance(architecture, str) and architecture.strip().lstrip('-').isdigit()):
+        index = int(architecture)
+        if 0 <= index < n:
+            return index
+        print(f"Error: model architecture index {index} is out of range (valid indices: 0 - {n - 1}).")
+        print_available_model_architectures()
+        exit(1)
+
+    # a model title; match case-insensitively and tolerant of underscores / extra whitespace
+    def normalize(text):
+        return " ".join(str(text).replace("_", " ").split()).lower()
+
+    target = normalize(architecture)
+    for j, title in enumerate(SEModel.AVAILABLE_MODELS):
+        if normalize(title) == target:
+            return j
+
+    print(f"Error: could not find a model architecture matching '{architecture}'.")
+    print_available_model_architectures()
+    exit(1)
+
+
 def train_model(training_data, output_directory, architecture=None, epochs=50, batch_size=32, negatives=0.0, copies=4, model_path='', gpus="0", parallel=1, rate=1e-3, name="Unnamed model", extra_augmentations=False):
     import keras.callbacks
+
+    architecture = resolve_model_architecture(architecture)
 
     class CheckpointCallback(keras.callbacks.Callback):
         def __init__(self, se_model, path):

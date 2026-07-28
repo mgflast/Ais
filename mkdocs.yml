@@ -12,6 +12,9 @@ nav:
           - "2️⃣ Training a model": guide/training.md
           - "3️⃣ Assessing model performance": guide/assessing_performance.md
           - "4️⃣ Using a model": guide/using_a_model.md
+       - "<b>Tutorials</b>":
+          - "1️⃣ Quick start": tutorials/quick_start.md
+          - "2️⃣ Microtubule inner proteins": tutorials/microtubule_inner_proteins.md
        - "<b>Additional software features</b>":
           - "🔴 Filters & display": features/filters.md
           - "🟠 Model-assisted annotation": features/model_assisted_annotation.md
@@ -20,7 +23,7 @@ nav:
           - "🔵 Model interactions": features/model_interactions.md
           - "🟣 Linking Ais and Pom": features/pom.md
           - "⚪️ Rendering & visualisation": features/rendering_export.md
-          - "🟤 Sharing models & the repository": features/sharing_models.md
+          - "🟤 Sharing models": features/sharing_models.md
           - "⚫️ Custom model architectures": features/custom_architectures.md
           - "🥳 Party mode": features/party_mode.md
        - "Command reference": cli/reference.md
