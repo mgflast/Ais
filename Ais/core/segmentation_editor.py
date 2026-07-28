@@ -4838,8 +4838,6 @@ class QueuedExport:
                 print(f"QueuedExport - applying model {m.title} ({m.info})")
                 self.colour = m.colour
                 m_norm = global_stats(mrcd) if m.normalization == NORM_GLOBAL_MAD else None
-                if m_norm is not None:
-                    print(f"[norm] export {m.title}: center={m_norm[0]:.4g} scale={m_norm[1]:.4g}")  # DEBUG
                 for j in range(self.dataset.export_bottom, self.dataset.export_top):
                     self.check_stop_request()
                     j_indices = np.clip(np.arange(j - m.model_depth // 2, j + m.model_depth // 2 + 1), 0, n_slices - 1)

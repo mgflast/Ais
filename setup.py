@@ -1,13 +1,13 @@
 from setuptools import setup, find_packages
 import shutil
 # how to release:
-# UPDATE VERSION IN 3 PLACES: Ais/core/config.py, setup.py, docs/conf.py
+# UPDATE VERSION IN 2 PLACES: Ais/core/config.py, setup.py
 
 # push to pypi:
 # python setup.py sdist
 # twine upload dist/*
 
-VERSION = '1.2.0'
+VERSION = '1.2.2'
 
 with open("README.md", "r", encoding="utf-8") as f:
     long_description = f.read()

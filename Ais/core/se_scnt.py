@@ -39,6 +39,7 @@ import numpy as np
 import mrcfile
 import tifffile
 from skimage.transform import resize
+from Ais.core.normalization import global_stats, NORM_GLOBAL_MAD
 
 
 FORMAT_VERSION = 1
@@ -260,6 +261,21 @@ def init_extract_worker(ctx):
     _extract_worker_ctx = ctx
 
 
+_stats_cache = {}   # path -> (center, scale)
+
+
+def _display_view(data):
+    # MRC mode-0 (int8) holds unsigned bytes in Ais; match SEFrame.get_slice
+    return data.view(np.uint8) if data.dtype == np.int8 else data
+
+
+def _volume_stats(path):
+    if path not in _stats_cache:
+        with mrcfile.mmap(path, mode='r', permissive=True) as m:
+            _stats_cache[path] = global_stats(_display_view(m.data), method=NORM_GLOBAL_MAD)
+    return _stats_cache[path]
+
+
 def extract_box_task(task):
     """Worker: extract and write all flavours + label for one box.
 
@@ -285,10 +301,12 @@ def extract_box_task(task):
     for flavour, path in task['flavour_paths'].items():
         if not os.path.exists(path):
             continue
+        center, scale = _volume_stats(path)   # normalize by the parent volume
         with mrcfile.mmap(path, mode='r', permissive=True) as m:
-            box, val = extract_box(m.data, z, y, x, box_size, box_depth, m.data.shape[0])
+            box, val = extract_box(_display_view(m.data), z, y, x, box_size, box_depth, m.data.shape[0])
         if flavour == ann:
             validity = val
+        box = (box - center) / scale
         box = _bin(box, binning)
         out_dir = os.path.join(group_dir, flavour)
         os.makedirs(out_dir, exist_ok=True)
@@ -347,6 +365,7 @@ def pack_staging_dir(staging_dir, out_path, apix, features, sources,
         'n_samples': n_samples,
         'input_flavours': input_flavours,
         'annotated_flavour': a_flavour,
+        'normalization': NORM_GLOBAL_MAD,
     }
     with open(os.path.join(staging_dir, 'metadata.json'), 'w') as f:
         json.dump(metadata, f, indent=2)
@@ -415,6 +434,8 @@ class ScntTrainingSet:
         if not self.input_flavours:
             raise ValueError(f"No input flavour directories (x_*) found in {path}")
 
+        self.normalization = meta.get('normalization')   # None = legacy per-box; else global
+
         self.annotated_flavour = meta.get('annotated_flavour')
         if self.annotated_flavour not in self.input_flavours:
             if len(self.input_flavours) == 1:
@@ -481,15 +502,19 @@ class ScntTrainingSet:
         h = self.hashes[index]
         # only mix flavours present for this sample
         available = self._flavours_for.get(h) or [self.annotated_flavour]
+        # legacy: normalize each box before mixing; global: boxes are pre-normalized at extract
+        prep = (lambda a: a) if self.normalization == NORM_GLOBAL_MAD else _normalize
         if training and len(available) > 1:
-            pool = list(available)
-            if self.annotated_flavour in pool:
-                pool.append(self.annotated_flavour)  # double-weight the annotated flavour
-            fa, fb = random.sample(pool, 2)
-            a = _normalize(self._read_input(h, fa))
-            b = _normalize(self._read_input(h, fb))
-            f = random.uniform(0.0, 1.0)
-            vol = a * f + b * (1.0 - f)
+            # 2/3 pure flavour (equal prob among available), 1/3 random-weight mixture;
+            # flavours treated equally (no annotated double-weight).
+            if random.random() < 2.0 / 3.0:
+                vol = prep(self._read_input(h, random.choice(available)))
+            else:
+                fa, fb = random.sample(available, 2)
+                a = prep(self._read_input(h, fa))
+                b = prep(self._read_input(h, fb))
+                f = random.uniform(0.0, 1.0)
+                vol = a * f + b * (1.0 - f)
         else:
             flavour = self.annotated_flavour if self.annotated_flavour in available else available[0]
             vol = self._read_input(h, flavour)
@@ -501,6 +526,11 @@ class ScntTrainingSet:
     def source_records(self):
         """Source dicts in sample (self.hashes) order; empty dict where missing."""
         return [self.sources.get(h, {}) for h in self.hashes]
+
+    def flavour_coverage(self):
+        """{flavour: number of samples that actually contain it}."""
+        return {f: sum(1 for h in self.hashes if f in self._flavours_for.get(h, []))
+                for f in self.input_flavours}
 
     def close(self):
         if self._tmp and os.path.isdir(self._tmp):
@@ -557,6 +587,13 @@ class PooledTrainingSet:
             flavours.update(s.input_flavours)
         self.input_flavours = sorted(flavours)
 
+        # global only if every pooled set is global; else fall back to legacy per-box
+        norms = {getattr(s, 'normalization', None) for s in self.sets}
+        self.normalization = NORM_GLOBAL_MAD if norms == {NORM_GLOBAL_MAD} else None
+        if len(norms) > 1:
+            print("Warning: pooling training sets with mixed normalization schemes; "
+                  "using per-box normalization for the model.")
+
     def positive_indices(self):
         out = []
         offset = 0
@@ -574,6 +611,14 @@ class PooledTrainingSet:
         for s in self.sets:
             records.extend(s.source_records())
         return records
+
+    def flavour_coverage(self):
+        out = {}
+        for s in self.sets:
+            if hasattr(s, "flavour_coverage"):
+                for f, n in s.flavour_coverage().items():
+                    out[f] = out.get(f, 0) + n
+        return out
 
     def close(self):
         for s in self.sets:
@@ -605,6 +650,7 @@ class LegacyTiffTrainingSet:
         self.n_samples, self.box_shape, _, self.box_depth = self._x.shape
         self.input_flavours = [DEFAULT_ANNOTATED_FLAVOUR]
         self.annotated_flavour = DEFAULT_ANNOTATED_FLAVOUR
+        self.normalization = None   # legacy per-box
         self.sources = {}
 
     def positive_indices(self):

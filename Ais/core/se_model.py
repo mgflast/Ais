@@ -9,12 +9,14 @@ from itertools import count
 import glob
 import os
 import sys
+from contextlib import nullcontext
 import Ais.core.config as cfg
 import importlib
 import threading
 import json
 from Ais.core.opengl_classes import Texture
 from Ais.core.util import generate_thumbnail
+from Ais.models.metrics import MaskedPrecision, MaskedRecall
 from scipy.ndimage import binary_dilation, gaussian_filter
 from skimage.transform import resize
 import datetime
@@ -22,6 +24,7 @@ import time
 import tarfile
 import tempfile
 import Ais.core.se_scnt as se_scnt
+from Ais.core.normalization import global_stats, NORM_GLOBAL_MAD
 
 
 
@@ -60,12 +63,17 @@ class SEModelDataLoader:
     def load_data(self):
         self.dataset = se_scnt.open_training_set(self.path)
         self.apix = self.dataset.apix
+        self.normalization = getattr(self.dataset, "normalization", None)
         self.n_samples = self.dataset.n_samples
         self.box_shape = self.dataset.box_shape
         self.box_depth = self.dataset.box_depth
 
         idx_positive = self.dataset.positive_indices()
-        flavour_info = "" if len(self.dataset.input_flavours) <= 1 else f", flavours: {', '.join(self.dataset.input_flavours)}"
+        if len(self.dataset.input_flavours) <= 1 or not hasattr(self.dataset, "flavour_coverage"):
+            flavour_info = ""
+        else:
+            cov = self.dataset.flavour_coverage()
+            flavour_info = f", flavour coverage (boxes): {', '.join(f'{k}={v}' for k, v in cov.items())}"
         if len(idx_positive) == 0:
             print(f'Training dataset at {self.path} contains no positive samples.')
         else:
@@ -174,6 +182,8 @@ class SEModelDataLoader:
         return x, y
 
     def preprocess(self, x, y):
+        if self.normalization == se_scnt.NORM_GLOBAL_MAD:   # global boxes are pre-normalized
+            return x, y
         x -= np.mean(x)
         x /= np.std(x) + 1e-7
         return x, y
@@ -268,6 +278,7 @@ class SEModel:
         self.info = ""
         self.info_short = ""
         self.loss = 0.0
+        self.normalization = None  # None = legacy per-box/per-slice; else global
         self.data = None
         if not no_glfw:
             self.texture = Texture(format="r32f")
@@ -324,7 +335,8 @@ class SEModel:
                 'excess_negative': self.excess_negative,
                 'emit': self.emit,
                 'absorb': self.absorb,
-                'loss': self.loss
+                'loss': self.loss,
+                'normalization': self.normalization
             }
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f)
@@ -395,20 +407,22 @@ class SEModel:
                 self.emit = metadata['emit']
                 self.absorb = metadata['absorb']
                 self.loss = metadata['loss']
+                self.normalization = metadata.get('normalization', None)  # absent => legacy
 
         except Exception as e:
             print("Error loading model - see details below\n", e)
 
-    def train(self, rate=None, external_callbacks=None, extra_augmentations=False):
+    def train(self, rate=None, external_callbacks=None, extra_augmentations=False, strategy=None):
         if self.train_data_path:
-            if self.compilation_mode == 'inference':
-                self.toggle_training()
-            process = BackgroundProcess(self._train, (rate, external_callbacks, extra_augmentations), name=f"{self.title} training")
+            # Model build/compile (incl. the inference->training rebuild) is deferred to _train
+            # so it runs inside strategy.scope() in the worker thread that calls fit() - the only
+            # place a MirroredStrategy actually distributes the fit.
+            process = BackgroundProcess(self._train, (rate, external_callbacks, extra_augmentations, strategy), name=f"{self.title} training")
             self.background_process_train = process
             self.inference_model = None
             process.start()
 
-    def _train(self, rate=None, external_callbacks=None, extra_augmentations=False, process=None):
+    def _train(self, rate=None, external_callbacks=None, extra_augmentations=False, strategy=None, process=None):
         try:
             start_time = time.time()
             validation_split = 0.0 if "VALIDATION_SPLIT" not in self.bcprms else self.bcprms["VALIDATION_SPLIT"]
@@ -416,26 +430,44 @@ class SEModel:
             loader = SEModelDataLoader(self.train_data_path, self.batch_size, validation_split, extra_augmentations=extra_augmentations)
             self.model_depth = loader.box_depth
             self.apix = loader.apix
+            self.normalization = loader.normalization
 
-            if not self.compiled:
-                self.compile(loader.box_shape, loader.box_depth)
+            # Continuing from an inference-mode model: pull out its weights and reset the graph
+            # *before* entering strategy.scope(). clear_session() resets the default graph and
+            # empties TF's per-graph distribution-strategy stack, so doing it inside the scope
+            # crashes on scope exit (IndexError: pop from empty list). The rebuild happens below.
+            restore_weights = None
+            if self.compilation_mode == 'inference':
+                restore_weights = self.model.get_weights()
+                del self.model
+                self.model = None
+                self.compiled = False
+                clear_session()
 
-            learning_rate = rate if rate is not None else cfg.settings["LEARNING_RATE"]
-            self.model.optimizer.learning_rate.assign(learning_rate)
+            # Build/compile and fit inside the scope so MirroredStrategy variables are created in
+            # this worker thread. nullcontext() = single-GPU / GUI (no distribution).
+            with (strategy.scope() if strategy is not None else nullcontext()):
+                if not self.compiled:
+                    self.compile(loader.box_shape, loader.box_depth)
+                if restore_weights is not None:
+                    self.model.set_weights(restore_weights)
 
-            training_generator, training_steps = loader.as_generator(validation=False)
-            validation_generator, validation_steps = None, None
-            if validation_split != 0.0:
-                validation_generator, validation_steps = loader.as_generator(validation=True)
+                learning_rate = rate if rate is not None else cfg.settings["LEARNING_RATE"]
+                self.model.optimizer.learning_rate.assign(learning_rate)
 
-            if training_steps == 0:
-                cfg.set_error(ValueError("No training samples available. Aborting."), "Could not train model - see details below.")
+                training_generator, training_steps = loader.as_generator(validation=False)
+                validation_generator, validation_steps = None, None
+                if validation_split != 0.0:
+                    validation_generator, validation_steps = loader.as_generator(validation=True)
 
-            callbacks = [TrainingProgressCallback(process, training_steps * self.n_copies, self.batch_size, self), StopTrainingCallback(process.stop_request)]
-            if not external_callbacks is None:
-                callbacks += external_callbacks
+                if training_steps == 0:
+                    cfg.set_error(ValueError("No training samples available. Aborting."), "Could not train model - see details below.")
 
-            self.model.fit(training_generator, steps_per_epoch=training_steps * self.n_copies, validation_data=validation_generator, validation_steps=validation_steps, epochs=self.epochs, validation_freq=1, callbacks=callbacks)
+                callbacks = [TrainingProgressCallback(process, training_steps * self.n_copies, self.batch_size, self), StopTrainingCallback(process.stop_request)]
+                if not external_callbacks is None:
+                    callbacks += external_callbacks
+
+                self.model.fit(training_generator, steps_per_epoch=training_steps * self.n_copies, validation_data=validation_generator, validation_steps=validation_steps, epochs=self.epochs, validation_freq=1, callbacks=callbacks)
             process.set_progress(1.0)
             print(f"{self.title} " + self.info + f" {time.time() - start_time:.1f} seconds of training.")
         except Exception as e:
@@ -448,6 +480,11 @@ class SEModel:
     def compile(self, box_size, box_depth=1):
         model_module_name = SEModel.AVAILABLE_MODELS[self.model_enum]
         self.model = SEModel.MODELS[model_module_name]((box_size, box_size, box_depth))
+        # Re-compile with the arch's own loss/optimizer plus streaming precision/recall,
+        # so they are printed per epoch during training (like easymode). Masked metrics
+        # respect the ignore label (2) and treat label==1 as foreground.
+        self.model.compile(optimizer=self.model.optimizer, loss=self.model.loss,
+                           metrics=[MaskedPrecision(), MaskedRecall()])
         self.compiled = True
         self.compilation_mode = 'training'
         self.box_size = box_size
@@ -497,7 +534,7 @@ class SEModel:
     def get_model_title(self):
         return SEModel.AVAILABLE_MODELS[self.model_enum]
 
-    def set_slice(self, slice_data, slice_pixel_size, roi, original_size):
+    def set_slice(self, slice_data, slice_pixel_size, roi, original_size, norm_stats=None):
         try:
             self.data = np.zeros(original_size)
             if not self.compiled:
@@ -505,7 +542,7 @@ class SEModel:
             if not self.active:
                 return False
             rx, ry = roi
-            self.data[rx[0]:rx[1], ry[0]:ry[1]] = self.apply_to_slice(slice_data[:, rx[0]:rx[1], ry[0]:ry[1]], slice_pixel_size)
+            self.data[rx[0]:rx[1], ry[0]:ry[1]] = self.apply_to_slice(slice_data[:, rx[0]:rx[1], ry[0]:ry[1]], slice_pixel_size, norm_stats=norm_stats)
             return True
         except Exception as e:
             print(e)
@@ -527,12 +564,14 @@ class SEModel:
         stride = int(self.box_size * (1.0 - self.overlap))
         boxes = list()
         image = np.pad(image, ((0, pad_w), (0, pad_h), (0, 0)), mode='reflect')
+        global_norm = self.normalization == NORM_GLOBAL_MAD
         for x in range(0, w + pad_w - self.box_size + 1, stride):
             for y in range(0, h + pad_h - self.box_size + 1, stride):
                 box = image[x:x + self.box_size, y:y + self.box_size, :]
-                mu = np.mean(box, axis=(0, 1, 2), keepdims=True)
-                std = np.std(box, axis=(0, 1, 2), keepdims=True) + 1e-7
-                box = (box - mu) / std
+                if not global_norm:   # legacy: per-box
+                    mu = np.mean(box, axis=(0, 1, 2), keepdims=True)
+                    std = np.std(box, axis=(0, 1, 2), keepdims=True) + 1e-7
+                    box = (box - mu) / std
                 boxes.append(box)
         if as_array:
             boxes = np.array(boxes)
@@ -570,7 +609,7 @@ class SEModel:
         out_image = out_image[:w, :h]
         return out_image
 
-    def apply_to_slice(self, image, pixel_size):
+    def apply_to_slice(self, image, pixel_size, norm_stats=None):
         # as of 251125: we always expect image to be a 3D numpy array; it is Z, Y, X when coming in to this function, but note that the models expects Z last.
 
         if self.compilation_mode == 'training' and self.background_process_train is None and cfg.settings["TILED_MODE"]==0:
@@ -594,9 +633,16 @@ class SEModel:
 
         image = np.transpose(image, (1, 2, 0))
         j, k, image_depth = image.shape
+
+        global_norm = self.normalization == NORM_GLOBAL_MAD
+        if global_norm:   # normalize whole slab once; caller passes the whole-volume stat
+            center, scale = norm_stats if norm_stats is not None else global_stats(np.transpose(image, (2, 0, 1)))
+            image = (image - center) / scale
+
         if self.compilation_mode == 'inference' and cfg.settings["TILED_MODE"]==0:
-            image -= np.mean(image)
-            image /= np.std(image) + 1e-7
+            if not global_norm:   # legacy: whole-slice
+                image -= np.mean(image)
+                image /= np.std(image) + 1e-7
 
             pad_h_min = (32 - (image.shape[0] % 32)) % 32
             pad_w_min = (32 - (image.shape[1] % 32)) % 32

@@ -3,6 +3,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # suppress TF C++ INFO and WARNING bef
 from Ais.core.se_frame import SEFrame
 from Ais.core.se_model import SEModel
 from Ais.core.segmentation_editor import QueuedExport
+from Ais.core.normalization import global_stats, NORM_GLOBAL_MAD
 import Ais.core.config as cfg
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')
@@ -59,9 +60,12 @@ def _parse_input_for_slice(input_volume, j, model_depth, model_dimensionality):
         return np.transpose(slab, (1, 2, 0))
 
 
-def _preprocess_tomo(tomo_path, model_apix):
+def _preprocess_tomo(tomo_path, model_apix, normalization=None):
     with mrcfile.open(tomo_path) as m:
-        volume = m.data.astype(np.float32)
+        if normalization == NORM_GLOBAL_MAD and m.data.dtype == np.int8:
+            volume = m.data.view(np.uint8).astype(np.float32)   # match GUI/extract int8 convention
+        else:
+            volume = m.data.astype(np.float32)
         volume_apix = float(m.voxel_size.x)
         in_voxel_size = m.voxel_size
         original_shape = volume.shape
@@ -70,13 +74,19 @@ def _preprocess_tomo(tomo_path, model_apix):
     if volume_apix == 0.0:
         print(f'warning: volume apix is 0.0 so we cannot determine the scaling factor. we will assume the real pixel size is 10.0')
         volume_apix = 10.0
+    global_norm = normalization == NORM_GLOBAL_MAD
+    if global_norm:   # whole-volume stat at native resolution, before rescale
+        center, scale = global_stats(volume)
+        volume -= center
+        volume /= scale
     if model_apix is not None:
         volume = scale_volume_xy(volume, volume_apix / float(model_apix))
-    for k in range(volume.shape[0]):
-        sl = volume[k]
-        sl -= sl.mean()
-        sl /= sl.std() + 1e-6
-        volume[k] = sl
+    if not global_norm:   # legacy: per-slice
+        for k in range(volume.shape[0]):
+            sl = volume[k]
+            sl -= sl.mean()
+            sl /= sl.std() + 1e-6
+            volume[k] = sl
     volume, padding = _pad_volume(volume)
     return {
         'volume': volume,
@@ -187,7 +197,7 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
             if os.path.exists(out_path) and not overwrite:
                 preproc_q.put(('skip', j, p, out_path, None))
             else:
-                preproc_q.put(('ready', j, p, out_path, executor.submit(_preprocess_tomo, p, model_apix)))
+                preproc_q.put(('ready', j, p, out_path, executor.submit(_preprocess_tomo, p, model_apix, se_model.normalization)))
         preproc_q.put(None)
 
     threading.Thread(target=_submit_preproc, daemon=True).start()
@@ -453,12 +463,12 @@ def train_model(training_data, output_directory, architecture=None, epochs=50, b
 
     os.environ["CUDA_VISIBLE_DEVICES"] = gpus
     checkpoint_callback = CheckpointCallback(model, os.path.join(output_directory, f"{model.title}{cfg.filetype_semodel}"))
-    if parallel:
-        strategy = tf.distribute.MirroredStrategy()
-        with strategy.scope():
-            model.train(rate=rate, external_callbacks=[checkpoint_callback], extra_augmentations=extra_augmentations)
-    else:
-        model.train(rate=rate, external_callbacks=[checkpoint_callback], extra_augmentations=extra_augmentations)
+    # train() spawns a worker thread; the strategy scope must be entered inside that thread
+    # (in _train, around build/compile/fit), not here. Wrapping the thread-spawning train()
+    # call did nothing for the off-thread fit, and on the -m path clear_session() ran inside
+    # the scope and emptied TF's strategy stack -> IndexError on scope exit.
+    strategy = tf.distribute.MirroredStrategy() if parallel else None
+    model.train(rate=rate, external_callbacks=[checkpoint_callback], extra_augmentations=extra_augmentations, strategy=strategy)
 
     while model.background_process_train.progress < 1.0:
         time.sleep(0.2)
@@ -602,29 +612,6 @@ def dispatch_parallel_pick(target, data_directory, output_directory, margin, thr
                 p.join(timeout=1)
 
 
-# [--easymode, hidden] IsoNet2 architecture tag used in the corrected-volume filenames.
-_EASYMODE_ISONET2_ARCH = "unet-medium"
-# Cache of reverse tomogram->dataset indices, keyed by dataset_contents.json path.
-_easymode_tomo_dataset_cache = {}
-
-
-def _easymode_tomo_dataset_map(map_path):
-    """this method is specific to the easymode development environment and shouldn't be called by end users"""
-    if map_path in _easymode_tomo_dataset_cache:
-        return _easymode_tomo_dataset_cache[map_path]
-    reverse = {}
-    try:
-        with open(map_path) as f:
-            dataset_tomo_map = json.load(f)
-        for dataset, tomos in dataset_tomo_map.items():
-            for tomo in tomos:
-                reverse[os.path.splitext(os.path.basename(tomo))[0]] = dataset
-    except Exception as e:
-        print(f"\teasymode: could not read dataset map {map_path} ({e})")
-    _easymode_tomo_dataset_cache[map_path] = reverse
-    return reverse
-
-
 def _find_flavours(tomo_path):
     """this method is specific to the easymode development environment and shouldn't be called by end users"""
     flavours = {}
@@ -633,22 +620,10 @@ def _find_flavours(tomo_path):
     # the easymode root is two levels up from the annotated tomogram.
     base = os.path.dirname(os.path.dirname(tomo_path))   # .../easymode
 
-    # ddw: flat alongside the cryocare volumes
-    ddw = os.path.join(base, 'volumes_ddw', stem + '.mrc')
-    if os.path.exists(ddw):
-        flavours['x_ddw'] = ddw
-
-    dataset = _easymode_tomo_dataset_map(os.path.join(base, 'datasets', 'dataset_contents.json')).get(stem)
-    if dataset is not None:
-        # raw: per-dataset Warp reconstruction
-        raw = os.path.join(base, 'datasets', dataset, 'warp_tiltseries', 'reconstruction', stem + '.mrc')
-        if os.path.exists(raw):
-            flavours['x_raw'] = raw
-        # iso: IsoNet2-corrected
-        iso = os.path.join(base, 'training', 'isonet2', 'per_dataset', dataset, 'corrected',
-                           f'_isonet2-n2n_{_EASYMODE_ISONET2_ARCH}_{stem}.mrc')
-        if os.path.exists(iso):
-            flavours['x_iso'] = iso
+    # isonet: flat alongside the cryocare volumes
+    iso = os.path.join(base, 'volumes_isonet', stem + '.mrc')
+    if os.path.exists(iso):
+        flavours['x_iso'] = iso
 
     return flavours
 
@@ -657,6 +632,8 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
     import pickle, tempfile, shutil
     import starfile, pandas as pd
     import Ais.core.se_scnt as se_scnt
+    from tqdm import tqdm
+    from collections import Counter
 
     MERGED_GROUP = "__merged__"
     annotated_tomograms = glob.glob(os.path.join(data_directory, "*.scns"))
@@ -731,13 +708,9 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
                     })
             continue
 
-        # annotated flavour, plus any extra flavours found with --easymode
-        flavour_paths = {se_scnt.DEFAULT_ANNOTATED_FLAVOUR: tomo}
-        if easymode:
-            extra = _find_flavours(tomo)
-            flavour_paths.update(extra)
-            if extra:
-                print('\033[96m' + f"\teasymode: found flavours {', '.join(extra.keys())}" + '\033[0m')
+        # flavours are found lazily: only once this tomogram actually contributes boxes
+        # for a requested feature (many .scns won't have the feature of interest).
+        flavour_paths = None
 
         for f in se_frame.features:
             if f.title not in features:
@@ -745,6 +718,14 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
             ann_bs = getattr(f, 'box_size', box_size)
             margin_per_side = max(0, (box_size - ann_bs) // 2)
             box_coordinates = [(z, b[0], b[1]) for z in f.boxes if f.boxes[z] for b in f.boxes[z]]
+            if not box_coordinates:
+                continue
+            if flavour_paths is None:
+                # x_main is the annotated (cryocare) flavour; --easymode adds any others found
+                flavour_paths = {se_scnt.DEFAULT_ANNOTATED_FLAVOUR: tomo}
+                if easymode:
+                    flavour_paths.update(_find_flavours(tomo))
+                print('\033[96m' + f"\tflavours: {', '.join(flavour_paths.keys())}" + '\033[0m')
             print('\033[96m' + f"\tparsing feature '{f.title}' ({len(box_coordinates)} boxes, annotation_box={ann_bs}, margin={margin_per_side})" + '\033[0m')
             group = MERGED_GROUP if merge else f.title
             for z, x, y in box_coordinates:
@@ -816,25 +797,34 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
         print('\033[96m' + f'extracting {len(tasks)} boxes using {n_proc} process(es)...' + '\033[0m')
         if n_proc == 1:
             se_scnt.init_extract_worker(ctx)
-            for i, t in enumerate(tasks, start=1):
+            for t in tqdm(tasks, desc='extracting boxes', unit='box'):
                 r = se_scnt.extract_box_task(t)
                 if r is not None:
                     results.append(r)
-                if i % 200 == 0 or i == len(tasks):
-                    print(f'\t{i}/{len(tasks)}')
         else:
             with multiprocessing.Pool(processes=n_proc, initializer=se_scnt.init_extract_worker, initargs=(ctx,)) as pool:
-                done = 0
-                for r in pool.imap_unordered(se_scnt.extract_box_task, tasks, chunksize=8):
-                    done += 1
+                for r in tqdm(pool.imap_unordered(se_scnt.extract_box_task, tasks, chunksize=8),
+                              total=len(tasks), desc='extracting boxes', unit='box'):
                     if r is not None:
                         results.append(r)
-                    if done % 200 == 0 or done == len(tasks):
-                        print(f'\t{done}/{len(tasks)}')
 
         group_sources = {}
         for group, h, source in results:
             group_sources.setdefault(group, {})[h] = source
+
+        # per-box flavour sets, for the "(x_main N, additional flavours ...)" report
+        hash_flavours = {t['hash']: tuple(t['flavour_paths'].keys()) for t in tasks}
+        _main = se_scnt.DEFAULT_ANNOTATED_FLAVOUR
+
+        def _flavour_detail(sources_dict):
+            c = Counter()
+            for h in sources_dict:
+                for flav in hash_flavours.get(h, ()):
+                    c[flav] += 1
+            extras = sorted(k for k in c if k != _main)
+            if not extras:
+                return ""
+            return f" ({_main} {c.get(_main, 0)}, additional flavours {', '.join(f'{k} ({c[k]})' for k in extras)})"
 
         if merge:
             names = [f for f in features if feature_box_count[f] > 0]
@@ -843,7 +833,7 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
             else:
                 merged_name = "_".join(names)
                 out_path = f"{box_size}x{box_size}x{box_depth}{_binning_tag}_{merged_name}.scnt"
-                print('\033[96m' + f'Merged: {len(group_sources[MERGED_GROUP])} training boxes. Saving as {out_path}' + '\033[0m')
+                print('\033[96m' + f'Merged: {len(group_sources[MERGED_GROUP])} training boxes{_flavour_detail(group_sources[MERGED_GROUP])} - saving as {out_path}' + '\033[0m')
                 se_scnt.pack_staging_dir(os.path.join(staging_root, MERGED_GROUP),
                                          os.path.join(output_directory, out_path),
                                          apix=apix_final, features=names, sources=group_sources[MERGED_GROUP])
@@ -853,7 +843,7 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
                 if f not in group_sources:
                     print('\033[96m' + f'{f}: 0 training boxes. Skipping export.' + '\033[0m')
                     continue
-                print('\033[96m' + f'{f}: {len(group_sources[f])} training boxes. Saving as {out_path}' + '\033[0m')
+                print('\033[96m' + f'{f}: {len(group_sources[f])} training boxes{_flavour_detail(group_sources[f])} - saving as {out_path}' + '\033[0m')
                 se_scnt.pack_staging_dir(os.path.join(staging_root, f),
                                          os.path.join(output_directory, out_path),
                                          apix=apix_final, features=[f], sources=group_sources[f])

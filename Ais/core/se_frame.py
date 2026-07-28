@@ -184,7 +184,6 @@ class SEFrame:
             slabs = np.stack([self.get_slice(int(z)) for z in zidx])
             center, scale = compute_global_stats(slabs)
             self._norm_cache = (self.path, center, scale)
-            print(f"[norm] {os.path.basename(self.path)}: center={center:.4g} scale={scale:.4g}")  # DEBUG
         return self._norm_cache[1], self._norm_cache[2]
 
     def get_roi_indices(self):

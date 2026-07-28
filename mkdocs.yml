@@ -25,6 +25,7 @@ nav:
           - "⚪️ Rendering & visualisation": features/rendering_export.md
           - "🟤 Sharing models": features/sharing_models.md
           - "⚫️ Custom model architectures": features/custom_architectures.md
+          - "🔴 The model library": features/model_library.md
           - "🥳 Party mode": features/party_mode.md
        - "Command reference": cli/reference.md
    - "🗄️ Model repository": https://www.aiscryoet.org
