@@ -51,11 +51,11 @@ _TAU_RECOLOR = 0.67      # ~2s transition when a level-up recolours the field
 # --- bokeh cursor avoidance (a gentle, heavily damped push - calm) ---------
 _AVOID_R = 200.0
 _AVOID_R2 = _AVOID_R * _AVOID_R
-_AVOID_ACCEL = 90.0
+_AVOID_ACCEL = 160.0
 _AVOID_DAMP = 0.02           # per-second velocity retention (heavy)
 _AVOID_BRUSH_RANGE = 2.0     # while the LMB is held (brushing): range x5
 _AVOID_BRUSH_STRENGTH = 2.0  # ...and strength x1.5
-_DRIFT = (3.0, 7.0)          # bokeh baseline drift speed (px/s); also the per-blob
+_DRIFT = (4.0, 11.0)         # bokeh baseline drift speed (px/s); also the per-blob
                              # damping threshold - only speed ABOVE it is damped away
 
 
@@ -126,20 +126,22 @@ def _siblings(active: Color) -> List[Color]:
     return out
 
 
-def spawn(active_colour, throttle: bool = True, count: int = 1, siblings=None) -> None:
+def spawn(active_colour, throttle: bool = True, count: int = 1, siblings=None) -> bool:
     """A user action drops `count` new shapes. Each colour is mostly the active
     tool's, but ~_OTHER_CHANCE of the time a sibling's colour and ~_INVERT_CHANCE
     of the time the inverted colour. `siblings` is the "other" colour pool - the
     caller passes it on the model tab (other models); it defaults to the other
     features in the tomogram. No-op unless a background is equipped. The continuous
-    brush passes throttle=True; discrete clicks pass throttle=False."""
+    brush passes throttle=True; discrete clicks pass throttle=False. Returns True
+    if shapes were spawned - callers spawning for several models in one frame use
+    it to throttle only the first call and let the rest of the batch through."""
     global _last_spawn_t
     prm = _params()
     if not prm.get("enabled", False) or active_colour is None:
-        return
+        return False
     now = time.monotonic()
     if throttle and (now - _last_spawn_t) < _SPAWN_MIN_DT:
-        return
+        return False
     _last_spawn_t = now
 
     active = (float(active_colour[0]), float(active_colour[1]), float(active_colour[2]))
@@ -184,6 +186,7 @@ def spawn(active_colour, throttle: bool = True, count: int = 1, siblings=None) -
         ))
     if len(_blobs) > _MAX_BLOBS:
         del _blobs[: len(_blobs) - _MAX_BLOBS]
+    return True
 
 
 def pulse(kind: str, colour) -> None:

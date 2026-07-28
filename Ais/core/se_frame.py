@@ -9,6 +9,7 @@ from Ais.core.background_process import BackgroundProcess
 from skimage import measure
 from scipy.ndimage import label, binary_dilation
 from Ais.core.util import coords_from_star
+from Ais.core.normalization import global_stats as compute_global_stats
 
 
 class SEFrame:
@@ -21,6 +22,7 @@ class SEFrame:
         self.uid = int(datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')+"000") + uid_counter
         self.path = path
         self.scns_path = "n/a"
+        self._norm_cache = None   # (path, center, scale)
         if os.path.exists(self.path):
             self.title = os.path.splitext(os.path.basename(path))[0]
             self.n_slices = 0
@@ -174,6 +176,16 @@ class SEFrame:
                 target_type = target_type_dict[out_data.dtype]
             out_data = np.array(out_data.astype(target_type, copy=False), dtype=float)
         return out_data
+
+    def global_norm_stats(self):
+        # whole-tomogram (center, scale), from 32 slices; cached, recomputed on path change
+        if self._norm_cache is None or self._norm_cache[0] != self.path:
+            zidx = np.linspace(0, self.n_slices - 1, min(32, self.n_slices)).astype(int)
+            slabs = np.stack([self.get_slice(int(z)) for z in zidx])
+            center, scale = compute_global_stats(slabs)
+            self._norm_cache = (self.path, center, scale)
+            print(f"[norm] {os.path.basename(self.path)}: center={center:.4g} scale={scale:.4g}")  # DEBUG
+        return self._norm_cache[1], self._norm_cache[2]
 
     def get_roi_indices(self):
         """Returns a tuple of tuples (x_indices, y_indices), where x_indices is (x_start, x_stop)"""
@@ -412,6 +424,7 @@ class Segmentation:
         self.hide = False
         self.contour = False
         self.expanded = False
+        self.collapsed = False   # GUI: feature panel folded down to its title row
         self.brush_size = 10.0
         self.show_boxes = True
         self.magic = False
@@ -430,6 +443,8 @@ class Segmentation:
         self.set_slice(self.parent.current_slice)
 
     def on_load(self):
+        if not hasattr(self, "collapsed"):   # attribute added later - older saved datasets lack it
+            self.collapsed = False
         uid_counter = next(Segmentation.idgen)
         self.uid = int(datetime.datetime.now().strftime('%Y%m%d%H%M%S%f') + "000") + uid_counter
         self.texture = Texture(format="r32f")

@@ -7,6 +7,7 @@ import dill as pickle
 from Ais.core.se_model import *
 from Ais.core.se_frame import *
 import Ais.core.se_scnt as se_scnt
+from Ais.core.normalization import global_stats, NORM_GLOBAL_MAD
 import Ais.core.widgets as widgets
 from Ais.core.util import clamp, bin_mrc
 from Ais.core import progression
@@ -39,6 +40,7 @@ class SegmentationEditor:
     # GUI params
     MAIN_WINDOW_WIDTH = 330
     FEATURE_PANEL_HEIGHT = 104
+    FEATURE_PANEL_HEIGHT_COLLAPSED = 35
     INFO_HISTOGRAM_HEIGHT = 70
     SLICER_WINDOW_VERTICAL_OFFSET = 30
     SLICER_WINDOW_WIDTH = 700
@@ -299,13 +301,18 @@ class SegmentationEditor:
         if self.active_tab in ["Export", "Models"] and cfg.se_active_frame is not None and cfg.se_active_frame.slice_changed:
             emissions = list()
             absorbing_models = list()
+            # background shapes: throttle the first model's spawn only - once it
+            # goes through, the other models' spawns this frame piggyback
+            _bg_throttle = True
             # launch the models
             for model in cfg.se_models:
-                model.set_slice(cfg.se_active_frame.get_slice(model_depth=model.model_depth), cfg.se_active_frame.pixel_size, cfg.se_active_frame.get_roi_indices(), cfg.se_active_frame.data.shape)
+                _nrm = cfg.se_active_frame.global_norm_stats() if model.normalization == NORM_GLOBAL_MAD else None
+                model.set_slice(cfg.se_active_frame.get_slice(model_depth=model.model_depth), cfg.se_active_frame.pixel_size, cfg.se_active_frame.get_roi_indices(), cfg.se_active_frame.data.shape, norm_stats=_nrm)
                 if model.active and model.compiled:
                     # applying a model to a new slice: XP orb from the model's panel, and a background shape
                     progression.award_inference(model.title, model.colour, screen_xy=getattr(model, "_panel_xy", None))
-                    progression.background_spawn(tuple(model.colour), throttle=True, siblings=[tuple(mm.colour) for mm in cfg.se_models if mm is not model])
+                    if progression.background_spawn(tuple(model.colour), throttle=_bg_throttle, siblings=[tuple(mm.colour) for mm in cfg.se_models if mm is not model]):
+                        _bg_throttle = False
                 if model.emit:
                     emissions.append(model.data)
                 if model.absorb:
@@ -564,6 +571,22 @@ class SegmentationEditor:
             try:
                 _, ext = os.path.splitext(f)
                 if ext == ".mrc":
+                    # ============ DEV-FLAVOUR-SWITCHER (TEMPORARY — DELETE ME) ============
+                    # Opening an isonet tomo that already has cryocare annotations: load the
+                    # cryocare .scns (the source of truth) and merely display the isonet
+                    # density, so a later save targets the cryocare .scns and can never
+                    # clobber it. Gated on Settings > Developer > "Show developer tools".
+                    if cfg.settings.get("SHOW_DEVELOPER_TOOLS", False) and "/volumes_isonet/" in f.replace("\\", "/"):
+                        _cryo_scns = os.path.normpath(
+                            (os.path.splitext(f)[0] + cfg.filetype_segmentation).replace("volumes_isonet", "volumes_cryocare"))
+                        if os.path.isfile(_cryo_scns):
+                            self.import_dataset(_cryo_scns)   # loads annotations; sets scns_path to cryocare
+                            _fr = cfg.se_frames[-1] if cfg.se_frames else None
+                            if _fr is not None and not _fr.includes_map:
+                                _fr.path = os.path.normpath(f)             # display the isonet density
+                                _fr.set_slice(_fr.current_slice, reset=True)
+                            continue
+                    # =====================================================================
                     cfg.se_frames.append(SEFrame(f))
                     SegmentationEditor.set_active_dataset(cfg.se_frames[-1])
                     self.parse_available_features()
@@ -675,6 +698,18 @@ class SegmentationEditor:
             if filename != '':
                 if filename[-len(cfg.filetype_segmentation):] != cfg.filetype_segmentation:
                     filename += cfg.filetype_segmentation
+                # ============ DEV-FLAVOUR-SWITCHER (TEMPORARY — DELETE ME) ============
+                # Never write annotations into volumes_isonet; cryocare is the source of
+                # truth. Redirect an isonet save target to cryocare, but refuse if that
+                # would overwrite an existing cryocare .scns this frame didn't load.
+                if cfg.settings.get("SHOW_DEVELOPER_TOOLS", False) and "/volumes_isonet/" in filename.replace("\\", "/"):
+                    _cryo = os.path.normpath(filename.replace("volumes_isonet", "volumes_cryocare"))
+                    if os.path.isfile(_cryo) and getattr(cfg.se_active_frame, "scns_path", "n/a") != _cryo:
+                        cfg.set_error(Exception(f"cryocare annotations already exist at {_cryo}"),
+                                      "Dev flavour save refused: open that .scns directly to edit it.")
+                        return
+                    filename = _cryo
+                # =====================================================================
                 if hasattr(cfg.se_active_frame, "scns_path"):
                     cfg.se_active_frame.scns_path = filename
                 with open(filename, 'wb') as pickle_file:
@@ -734,6 +769,7 @@ class SegmentationEditor:
                 self.show_boot_img = imgui.begin("##boot_sprite", True,imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_ALWAYS_AUTO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_SCROLLBAR)[1]
                 imgui.image(self.boot_sprite_texture.renderer_id, _w, _h)
                 _boot_caption = f"{cfg.app_name} {cfg.version}"
+                imgui.set_cursor_pos_y(imgui.get_cursor_pos_y() + 10.0)
                 imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + (_w - imgui.calc_text_size(_boot_caption)[0]) / 2.0)
                 imgui.text(_boot_caption)
                 imgui.push_style_color(imgui.COLOR_POPUP_BACKGROUND, *cfg.COLOUR_WINDOW_BACKGROUND)
@@ -948,10 +984,34 @@ class SegmentationEditor:
                         return
                     features = cfg.se_active_frame.features
                     for f in features:
+                        collapsed = getattr(f, "collapsed", False)
                         pop_active_colour = False
                         if cfg.se_active_frame.active_feature == f:
                             imgui.push_style_color(imgui.COLOR_CHILD_BACKGROUND, *cfg.COLOUR_FRAME_ACTIVE)
                             pop_active_colour = True
+                        if collapsed:
+                            # folded down to a header: colour swatch + name only, no scrollbar
+                            imgui.begin_child(f"##feat_{f.uid}", 0.0, SegmentationEditor.FEATURE_PANEL_HEIGHT_COLLAPSED, True, imgui.WINDOW_NO_SCROLLBAR)
+                            cw = imgui.get_content_region_available_width()
+                            _, f.colour = imgui.color_edit3(f.title, *f.colour[:3], imgui.COLOR_EDIT_NO_INPUTS | imgui.COLOR_EDIT_NO_LABEL | imgui.COLOR_EDIT_NO_TOOLTIP | imgui.COLOR_EDIT_NO_DRAG_DROP)
+                            if _:
+                                self.parse_available_features()
+                            imgui.same_line()
+                            imgui.align_text_to_frame_padding()
+                            imgui.text(f.title)
+                            # right-clicking empty panel space opens the collapse menu
+                            if imgui.is_window_hovered() and not imgui.is_any_item_hovered() and imgui.is_mouse_clicked(1):
+                                imgui.open_popup("##feature_collapse_ctx")
+                            self._gui_feature_collapse_context_menu(f, "##feature_collapse_ctx")
+                            if imgui.is_window_hovered() and imgui.is_mouse_clicked(0):
+                                cfg.se_active_frame.active_feature = f
+                            if imgui.is_window_hovered() and not imgui.is_any_item_hovered() and imgui.is_mouse_double_clicked(0):
+                                f.collapsed = False
+                            if pop_active_colour:
+                                imgui.pop_style_color(1)
+                            imgui.end_child()
+                            continue
+
                         imgui.begin_child(f"##feat_{f.uid}", 0.0, SegmentationEditor.FEATURE_PANEL_HEIGHT + 16 * f.magic, True)
                         cw = imgui.get_content_region_available_width()
 
@@ -974,6 +1034,10 @@ class SegmentationEditor:
                             imgui.open_popup("##feature_ctx")
                         imgui.pop_style_color(4)
                         self._gui_feature_title_context_menu(f, "##feature_ctx")
+                        # right-clicking the panel (not an item) opens the collapse menu
+                        if imgui.is_window_hovered() and not imgui.is_any_item_hovered() and imgui.is_mouse_clicked(1):
+                            imgui.open_popup("##feature_collapse_ctx")
+                        self._gui_feature_collapse_context_menu(f, "##feature_collapse_ctx")
 
                         # Alpha slider and brush size
                         imgui.push_style_var(imgui.STYLE_FRAME_PADDING, (0, 0))
@@ -1096,6 +1160,9 @@ class SegmentationEditor:
 
                         if imgui.is_window_hovered() and imgui.is_mouse_clicked(0):
                             cfg.se_active_frame.active_feature = f
+                        # double-clicking empty panel space collapses it
+                        if imgui.is_window_hovered() and not imgui.is_any_item_hovered() and imgui.is_mouse_double_clicked(0):
+                            f.collapsed = True
 
 
                         imgui.end_child()
@@ -2317,12 +2384,8 @@ class SegmentationEditor:
                         #     cfg.edit_setting("DEBUG_PREPROC_BIN_5", not cfg.settings["DEBUG_PREPROC_BIN_5"])
                         #     cfg.edit_setting("DEBUG_PREPROC_BIN_2", False)
                         #     cfg.edit_setting("DEBUG_PREPROC_BIN_3", False)
-                        if imgui.menu_item("(debug) FLAG_A", selected=cfg.settings["DEBUG_A"])[0]:
-                            cfg.edit_setting("DEBUG_A", not cfg.settings["DEBUG_A"])
-                        if imgui.menu_item("(debug) FLAG_B", selected=cfg.settings["DEBUG_B"])[0]:
-                            cfg.edit_setting("DEBUG_B", not cfg.settings["DEBUG_B"])
-                        if imgui.menu_item("(debug) FLAG_C", selected=cfg.settings["DEBUG_C"])[0]:
-                            cfg.edit_setting("DEBUG_C", not cfg.settings["DEBUG_C"])
+                        if imgui.menu_item("Show developer tools", None, cfg.settings["SHOW_DEVELOPER_TOOLS"])[0]:
+                            cfg.edit_setting("SHOW_DEVELOPER_TOOLS", not cfg.settings["SHOW_DEVELOPER_TOOLS"])
                         imgui.end_menu()
 
                     imgui.end_menu()
@@ -3057,9 +3120,13 @@ class SegmentationEditor:
     def render_party_buttons(self):
         # Three frosted-glass circular buttons at the top-left, just right of the
         # main menu bar: toggle Party mode, toggle dark mode, open the feature
-        # library. No labels.
+        # library. No labels. (A temporary 4th dev button may appear, see below.)
         D, G = 40.0, 10.0
-        win_w, win_h = 3.0 * D + 2.0 * G, D
+        # DEV-FLAVOUR-SWITCHER (TEMPORARY): show a 4th button when Settings > Developer >
+        # "Show developer tools" is on.
+        _dev_flavour = cfg.settings.get("SHOW_DEVELOPER_TOOLS", False)
+        _n_btns = 4 if _dev_flavour else 3
+        win_w, win_h = _n_btns * D + (_n_btns - 1) * G, D
         imgui.push_style_var(imgui.STYLE_WINDOW_PADDING, (0, 0))
         imgui.push_style_var(imgui.STYLE_ITEM_SPACING, (0, 0))
         imgui.push_style_var(imgui.STYLE_WINDOW_BORDERSIZE, 0.0)
@@ -3091,6 +3158,34 @@ class SegmentationEditor:
             if SegmentationEditor.FEATURE_LIB_OPEN:
                 self.parse_available_features()
         self.tooltip("Feature library")
+        # ==================== DEV-FLAVOUR-SWITCHER (TEMPORARY — DELETE ME) ====================
+        # Developer-only 4th glass button (gated on Settings > Developer > "Show developer tools").
+        # It flips the active tomogram's .mrc between its volumes_cryocare/ and volumes_isonet/
+        # variants (same filename, sibling directory) when the counterpart file exists — coloured
+        # when a counterpart exists, greyed out otherwise. Throwaway dev tooling: to remove the
+        # feature, delete this block, the "_dev_flavour" width bump above, and the "swap" icon
+        # case in _draw_party_icon. All three are tagged "DEV-FLAVOUR-SWITCHER".
+        if _dev_flavour:
+            imgui.same_line(spacing=G)
+            _f = cfg.se_active_frame
+            _dest = None
+            if _f is not None and not _f.includes_map and _f.path:
+                _norm = _f.path.replace("\\", "/")
+                if "/volumes_cryocare/" in _norm:
+                    _cand = _norm.replace("/volumes_cryocare/", "/volumes_isonet/")
+                elif "/volumes_isonet/" in _norm:
+                    _cand = _norm.replace("/volumes_isonet/", "/volumes_cryocare/")
+                else:
+                    _cand = None
+                if _cand is not None and os.path.isfile(_cand):
+                    _dest = os.path.normpath(_cand)
+            if self._glass_circle_button("##dev_flavour_switch", D, "swap", _dest is not None, (0.20, 0.85, 0.68)):
+                if _dest is not None:
+                    _f.path = _dest
+                    _f.set_slice(_f.current_slice, reset=True)   # re-read pixels from the swapped file
+                    SegmentationEditor.FRAME_TEXTURE_REQUIRES_UPDATE = True
+            self.tooltip("DEV: cryocare ↔ isonet flavour" + ("" if _dest else " (no counterpart found)"))
+        # =====================================================================================
         imgui.end()
         imgui.pop_style_var(3)
 
@@ -3129,6 +3224,12 @@ class SegmentationEditor:
                 if prev is not None:
                     dl.add_triangle_filled(cx, cy, prev[0], prev[1], pt[0], pt[1], col)
                 prev = pt
+        elif icon == "swap":  # DEV-FLAVOUR-SWITCHER (TEMPORARY): two opposed arrows; delete with the feature
+            aw, ah, dy = r * 0.5, r * 0.16, r * 0.22
+            dl.add_line(cx - aw, cy - dy, cx + aw, cy - dy, col, 2.0)          # top arrow, pointing right
+            dl.add_triangle_filled(cx + aw, cy - dy, cx + aw - ah, cy - dy - ah, cx + aw - ah, cy - dy + ah, col)
+            dl.add_line(cx + aw, cy + dy, cx - aw, cy + dy, col, 2.0)          # bottom arrow, pointing left
+            dl.add_triangle_filled(cx - aw, cy + dy, cx - aw + ah, cy + dy - ah, cx - aw + ah, cy + dy + ah, col)
         else:  # "library" - a 2x2 grid of rounded tiles
             g, gap = r * 0.17, r * 0.07
             step = g + gap
@@ -3221,6 +3322,20 @@ class SegmentationEditor:
             if n_cols > 1:
                 imgui.columns(1)
             imgui.pop_style_var(1)
+            imgui.end_popup()
+
+    def _gui_feature_collapse_context_menu(self, feature, popup_id):
+        # Small right-click menu on an annotation feature panel: fold panels down.
+        if imgui.begin_popup(popup_id):
+            collapsed = getattr(feature, "collapsed", False)
+            if imgui.menu_item("expand" if collapsed else "collapse")[0]:
+                feature.collapsed = not collapsed
+            if imgui.menu_item("collapse all")[0]:
+                for f in feature.parent.features:
+                    f.collapsed = True
+            if imgui.menu_item("expand all")[0]:
+                for f in feature.parent.features:
+                    f.collapsed = False
             imgui.end_popup()
 
     @staticmethod
@@ -4722,10 +4837,13 @@ class QueuedExport:
             for m in self.models:
                 print(f"QueuedExport - applying model {m.title} ({m.info})")
                 self.colour = m.colour
+                m_norm = global_stats(mrcd) if m.normalization == NORM_GLOBAL_MAD else None
+                if m_norm is not None:
+                    print(f"[norm] export {m.title}: center={m_norm[0]:.4g} scale={m_norm[1]:.4g}")  # DEBUG
                 for j in range(self.dataset.export_bottom, self.dataset.export_top):
                     self.check_stop_request()
                     j_indices = np.clip(np.arange(j - m.model_depth // 2, j + m.model_depth // 2 + 1), 0, n_slices - 1)
-                    segmented_slice = m.apply_to_slice(mrcd[j_indices, rx[0]:rx[1], ry[0]:ry[1]], self.dataset.pixel_size) * 255
+                    segmented_slice = m.apply_to_slice(mrcd[j_indices, rx[0]:rx[1], ry[0]:ry[1]], self.dataset.pixel_size, norm_stats=m_norm) * 255
                     segmentations[m_idx, j, rx[0]:rx[1], ry[0]:ry[1]] = segmented_slice
                     n_slices_complete += 1
                     self.process.set_progress(min([0.999, n_slices_complete / n_slices_total]))
