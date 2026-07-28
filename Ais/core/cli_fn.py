@@ -1,4 +1,4 @@
-import os, time, multiprocessing, glob, itertools, glfw, mrcfile, json
+import os, time, multiprocessing, glob, itertools, glfw, mrcfile, json, random
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # suppress TF C++ INFO and WARNING before import
 from Ais.core.se_frame import SEFrame
 from Ais.core.se_model import SEModel
@@ -303,8 +303,10 @@ def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus,
             matches = glob.glob(p)
             all_data_paths.extend(matches)
 
-    # Deduplicate and sort for determinism
-    all_data_paths = [f for f in sorted(set(all_data_paths)) if os.path.splitext(f)[-1] == ".mrc"]
+    # dedupe, then shuffle so a many-dataset run interleaves them (a representative mix sooner,
+    # rather than finishing all of dataset 1 before starting dataset 2)
+    all_data_paths = [f for f in set(all_data_paths) if os.path.splitext(f)[-1] == ".mrc"]
+    random.shuffle(all_data_paths)
 
     if len(all_data_paths) == 0:
         print(f"No .mrc files found for data_directory={patterns}. Nothing to do.")
