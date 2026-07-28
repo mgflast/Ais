@@ -4541,7 +4541,10 @@ class Camera:
         returns: [world_pos_x, world_pos_y]
         Converts an input cursor position to corresponding world position. Assuming orthographic projection matrix.
         """
-        inverse_matrix = np.linalg.inv(self.view_projection_matrix)
+        try:
+            inverse_matrix = np.linalg.inv(self.view_projection_matrix)
+        except np.linalg.LinAlgError:
+            return [float(self.position[0]), float(self.position[1])]   # degenerate camera; don't crash
         window_coordinates = (2 * cursor_pos[0] / cfg.window_width - 1, 1 - 2 * cursor_pos[1] / cfg.window_height)
         window_vec = np.matrix([*window_coordinates, 1.0, 1.0]).T
         world_vec = (inverse_matrix * window_vec)
@@ -4565,6 +4568,7 @@ class Camera:
         self.projection_height = window_height
 
     def on_update(self):
+        self.zoom = float(np.clip(self.zoom, 1e-4, 1e4))   # never let zoom reach 0 -> singular view matrix
         self.view_matrix = np.matrix([
             [self.zoom, 0.0, 0.0, self.position[0] * self.zoom],
             [0.0, self.zoom, 0.0, self.position[1] * self.zoom],
