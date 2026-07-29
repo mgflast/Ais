@@ -296,12 +296,8 @@ def render_xp_hud(window_width: int, window_height: int, hidden: bool = False) -
         xp = p.skill_xp(name)
         L, into, needed = _profile.xp_into_level(xp)
 
-        # the feature colour is a slim rectangle on the right edge (drawn below);
-        # content spans the full width up to the small gap before it
-        swatch_w = 5.0
-        swatch_x = row_x + _XP_HUD_W - swatch_w - 2
         content_x = row_x
-        content_right = swatch_x - 6
+        content_right = row_x + _XP_HUD_W - 8
 
         lv_text = f"level {L}"
         lv_tw, lv_th = imgui.calc_text_size(lv_text)
@@ -348,12 +344,6 @@ def render_xp_hud(window_width: int, window_height: int, hidden: bool = False) -
         if flash > 0:
             dl.add_rect_filled(bar_x, bar_y, bar_x + bar_w, bar_y + bar_h,
                                imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.30 * flash), 0.0)
-
-        # feature colour: a slim rectangle on the right, spanning the text-to-bar height
-        dl.add_rect_filled(swatch_x, row_top + 2, swatch_x + swatch_w, bar_y + bar_h,
-                           imgui.get_color_u32_rgba(color[0], color[1], color[2], row_alpha), 1.5)
-        dl.add_rect(swatch_x, row_top + 2, swatch_x + swatch_w, bar_y + bar_h,
-                    imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 0.55 * row_alpha), 1.5, 0, 1.0)
 
     orbs.set_targets(orb_targets)
     imgui.end()
