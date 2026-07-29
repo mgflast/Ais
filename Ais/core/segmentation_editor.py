@@ -3861,7 +3861,11 @@ class Brush:
 
 
         mu = image[x, y]
-        value_range = [mu * (1.0 - (100.0 - (50 + 0.5 * segmentation.magic_strength)) / 100.0), mu * (1.0 + (100.0 - (50 + 0.5 * segmentation.magic_strength)) / 100.0)]
+        # slider (1..100 "% sensitivity", low = more dilated) -> band half-width fraction. Linear
+        # over [0.05, 1.5] so the whole slider is usable and the widest setting is far more dilated
+        # than before (was capped near +-0.5).
+        hwf = 0.05 + 1.45 * (100.0 - segmentation.magic_strength) / 99.0
+        value_range = [mu * (1.0 - hwf), mu * (1.0 + hwf)]
         if value_range[0] > value_range[1]:
             value_range[0], value_range[1] = value_range[1], value_range[0]
         # set up the ROI coordinates and image coordinates of the region to draw in
