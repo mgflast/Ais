@@ -303,10 +303,11 @@ def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus,
             matches = glob.glob(p)
             all_data_paths.extend(matches)
 
-    # dedupe, then shuffle so a many-dataset run interleaves them (a representative mix sooner,
-    # rather than finishing all of dataset 1 before starting dataset 2)
-    all_data_paths = [f for f in set(all_data_paths) if os.path.splitext(f)[-1] == ".mrc"]
-    random.shuffle(all_data_paths)
+    # dedupe + sort to a canonical order, then shuffle with a fixed seed: a many-dataset run
+    # interleaves datasets (a representative mix sooner) but the order is reproducible - the same
+    # set of tomograms always yields the same (pseudo-random) order
+    all_data_paths = sorted(f for f in set(all_data_paths) if os.path.splitext(f)[-1] == ".mrc")
+    random.Random(0).shuffle(all_data_paths)
 
     if len(all_data_paths) == 0:
         print(f"No .mrc files found for data_directory={patterns}. Nothing to do.")
