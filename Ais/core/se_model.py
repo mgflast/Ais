@@ -409,6 +409,14 @@ class SEModel:
                 self.loss = metadata['loss']
                 self.normalization = metadata.get('normalization', None)  # absent => legacy
 
+                # a CLI-trained model keeps a default model colour; if its title matches a feature
+                # in the active library, adopt that feature's colour (don't touch custom colours).
+                if any(all(abs(self.colour[i] - d[i]) < 1e-3 for i in range(3)) for d in SEModel.DEFAULT_COLOURS):
+                    for f in cfg.feature_library:
+                        if f.title == self.title:
+                            self.colour = tuple(f.colour)
+                            break
+
         except Exception as e:
             print("Error loading model - see details below\n", e)
 
