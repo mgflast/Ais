@@ -119,11 +119,18 @@ def draw_particles(camera=None, screen_h: float = 0.0) -> None:
     orbs.draw()
 
 
+_brush_trail_tick = 0
+
+
 def emit_brush_trail(cx: float, cy: float, radius_px: float, color: Color, skill_level: int) -> None:
     if not cfg.settings.get("PERK_CURSOR", True):
         return
     tier = perks.perk_for_level(skill_level)
     if tier is None or tier.cursor_n <= 0:
+        return
+    global _brush_trail_tick   # emit on every 3rd call -> ~1/3 as many cursor sparkles
+    _brush_trail_tick += 1
+    if _brush_trail_tick % 3 != 0:
         return
     prm = cosmetics.params(cosmetics.CURSOR)
     particles.emit_brush_ring(cx, cy, radius_px, color, n=tier.cursor_n, h_amp=tier.hue_amp, world=True,
