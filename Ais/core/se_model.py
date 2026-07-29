@@ -564,7 +564,7 @@ class SEModel:
         stride = int(self.box_size * (1.0 - self.overlap))
         boxes = list()
         image = np.pad(image, ((0, pad_w), (0, pad_h), (0, 0)), mode='reflect')
-        global_norm = self.normalization == NORM_GLOBAL_MAD
+        global_norm = cfg.settings["NORMALIZATION"] == "global"
         for x in range(0, w + pad_w - self.box_size + 1, stride):
             for y in range(0, h + pad_h - self.box_size + 1, stride):
                 box = image[x:x + self.box_size, y:y + self.box_size, :]
@@ -634,7 +634,7 @@ class SEModel:
         image = np.transpose(image, (1, 2, 0))
         j, k, image_depth = image.shape
 
-        global_norm = self.normalization == NORM_GLOBAL_MAD
+        global_norm = cfg.settings["NORMALIZATION"] == "global"
         if global_norm:   # normalize whole slab once; caller passes the whole-volume stat
             center, scale = norm_stats if norm_stats is not None else global_stats(np.transpose(image, (2, 0, 1)))
             image = (image - center) / scale

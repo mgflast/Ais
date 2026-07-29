@@ -306,7 +306,7 @@ class SegmentationEditor:
             _bg_throttle = True
             # launch the models
             for model in cfg.se_models:
-                _nrm = cfg.se_active_frame.global_norm_stats() if model.normalization == NORM_GLOBAL_MAD else None
+                _nrm = cfg.se_active_frame.global_norm_stats() if cfg.settings["NORMALIZATION"] == "global" else None
                 model.set_slice(cfg.se_active_frame.get_slice(model_depth=model.model_depth), cfg.se_active_frame.pixel_size, cfg.se_active_frame.get_roi_indices(), cfg.se_active_frame.data.shape, norm_stats=_nrm)
                 if model.active and model.compiled:
                     # applying a model to a new slice: XP orb from the model's panel, and a background shape
@@ -2193,6 +2193,17 @@ class SegmentationEditor:
                                                  "where model predictions are typically the best quality.")
                                     imgui.end_menu()
                             imgui.end_menu()
+
+                        if imgui.begin_menu("Normalization"):
+                            if imgui.menu_item("per-slice", None, cfg.settings["NORMALIZATION"] == "per-slice")[0]:
+                                cfg.edit_setting("NORMALIZATION", "per-slice")
+                            self.tooltip("Standardize each slice on its own during inference (default).")
+                            if imgui.menu_item("global", None, cfg.settings["NORMALIZATION"] == "global")[0]:
+                                cfg.edit_setting("NORMALIZATION", "global")
+                            self.tooltip("Standardize the whole tomogram by one robust statistic during inference.\n"
+                                         "Match this to how the model's training data was normalized.")
+                            imgui.end_menu()
+
                         if imgui.begin_menu("TTA multiplicity"):
                             for i in range(1, 9):
                                 if imgui.menu_item(f'{i}', None, cfg.settings["TEST_TIME_AUGMENTATIONS"] == i)[0]:
@@ -4841,7 +4852,7 @@ class QueuedExport:
             for m in self.models:
                 print(f"QueuedExport - applying model {m.title} ({m.info})")
                 self.colour = m.colour
-                m_norm = global_stats(mrcd) if m.normalization == NORM_GLOBAL_MAD else None
+                m_norm = global_stats(mrcd) if cfg.settings["NORMALIZATION"] == "global" else None
                 for j in range(self.dataset.export_bottom, self.dataset.export_top):
                     self.check_stop_request()
                     j_indices = np.clip(np.arange(j - m.model_depth // 2, j + m.model_depth // 2 + 1), 0, n_slices - 1)
