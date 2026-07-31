@@ -107,17 +107,13 @@ def main():
     extract_parsers.add_argument('-ou', '--output_directory', required=False, type=str, default='.', help="Directory to save the extracted training data (.scnt files).")
     extract_parsers.add_argument('-f', "--features", nargs="+", required=True, help="List of features to extract, e.g. 'Membrane Ribosome Microtubule'. A separate output file is created for each feature.")
     extract_parsers.add_argument('-size', "--box-size", required=False, type=int, default=128, help="Box size (in pixels) to extract. When not specified, box size is taken from the annotations.")
-    extract_parsers.add_argument('-depth', "--box-depth", required=False, type=int, default=1, help="Box depth (in Z) to extract. Default 1 (2D). Must be odd - if not odd we add 1.")
-    extract_parsers.add_argument('-bin', "--binning", required=False, type=int, default=1, help="Binning factor to apply (in XY). Output box size will be --box-size / --binning.")
-    # margin is now computed automatically from the difference between --box-size and the annotation box size
+    extract_parsers.add_argument('-depth', "--box-depth", required=False, type=int, default=1, help="Box depth (in pixels) to extract. Default 1 (2D). Multiples of 4 are best. For any slab depth, 4 additional slices are extracted at the top and bottom, to allow positional augmentation in Z during 3D training (this extra context lives only in the .scnt and does not change the model depth).")
     extract_parsers.add_argument('-e', "--exclude", required=False, type=str, nargs='+', default=None, help="Glob pattern or path to .txt file listing volumes to exclude from the extracted training data set..")
-    extract_parsers.add_argument('-a', "--apix", default=None, required=False, type=float, help="Override the pixel size found in the tomogram header and use this value instead.")
-    extract_parsers.add_argument('--merge', required=False, action='store_true', help="Combine all extracted training data into a single output file per feature, rather than one file per input volume.")
+    extract_parsers.add_argument('-a', "--apix", default=10.0, required=False, type=float, help="Target pixel size (Angstrom/px) for the extracted boxes. Each tomogram is resampled (in XY, with an anti-aliased scaler - the same one inference uses) from its header pixel size to this value, so tomograms with differing pixel sizes are brought onto a common grid. Written to the .scnt header and filename. Default 10.0.")
+    extract_parsers.add_argument('--merge', required=False, action='store_true', help="Combine all extracted training data into a single output file, rather than one file per extracted feature.")
     extract_parsers.add_argument('--coordinates', required=False, action='store_true', help="Instead of exporting annotated training images, export just the box coordinates as a .star file.")
     extract_parsers.add_argument('--easymode', required=False, action='store_true', help=argparse.SUPPRESS)
 
-
-    # feature_visualisation and audit are disabled / not shipped in this release.
     # fviz_parser = subparsers.add_parser('feature_visualisation', help="Synthesize input images that maximally activate a model's output feature (feature visualization).")
     # fviz_parser.add_argument('-m', '--model_path', required=True, type=str, help="Path to the model file (.scnm).")
     # fviz_parser.add_argument('-size', '--size', required=False, type=int, default=64, help="Side length (pixels) of the synthesized square images. Rounded up to a multiple of 32 (min 64). Default 64.")
@@ -206,13 +202,11 @@ def main():
                                          output_directory=args.output_directory,
                                          box_size=args.box_size,
                                          box_depth=args.box_depth,
-                                         binning=args.binning,
                                          exclude=args.exclude,
                                          merge=args.merge,
                                          coordinates=args.coordinates,
                                          apix=args.apix,
                                          easymode=args.easymode)
-        # feature_visualisation and audit are disabled / not shipped in this release.
         # elif args.command == 'feature_visualisation':
         #     from Ais.core.feature_vis import run_feature_visualisation
         #     run_feature_visualisation(model_path=args.model_path,

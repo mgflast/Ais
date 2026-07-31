@@ -49,6 +49,9 @@ class SEModelDataLoader:
         self.dataset = None
         self.box_shape = None
         self.box_depth = None
+        self.z_jitter = 0            # extra stored Z-context for position jitter
+        self.stored_depth = None     # slices per stored box (= box_depth + z_jitter)
+        self.slab = False            # set by SEModel._train once the model type is known
 
         self.n_samples = 0
         self.idx_training_positive = []
@@ -67,6 +70,8 @@ class SEModelDataLoader:
         self.n_samples = self.dataset.n_samples
         self.box_shape = self.dataset.box_shape
         self.box_depth = self.dataset.box_depth
+        self.z_jitter = getattr(self.dataset, "z_jitter", 0)
+        self.stored_depth = getattr(self.dataset, "stored_depth", self.box_depth)
 
         idx_positive = self.dataset.positive_indices()
         if len(self.dataset.input_flavours) <= 1 or not hasattr(self.dataset, "flavour_coverage"):
@@ -87,7 +92,24 @@ class SEModelDataLoader:
         self.idx_training_positive = [i for i in idx_positive if i in self.idx_training_all]
 
     def get_sample(self, index, training=True):
-        return self.dataset.get_sample(index, training=training)
+        x, y = self.dataset.get_sample(index, training=training)   # x (H,W,stored), y (H,W,1)
+        if self.stored_depth == self.box_depth and not self.slab:
+            return x, y
+        return self._crop(x, y, training)
+
+    def _crop(self, x, y, training):
+        # Crop the model-depth window from the stored (jittered) box. For a slab model the crop
+        # offset is random (so the annotated slice lands at a random Z-position, supervised via a
+        # masked slab label); otherwise it's centred. The annotation sits at stored_depth//2.
+        D, maxoff = self.box_depth, self.stored_depth - self.box_depth
+        o = int(np.random.randint(0, maxoff + 1)) if (self.slab and training and maxoff > 0) else maxoff // 2
+        x = x[:, :, o:o + D]
+        if self.slab:
+            r = self.stored_depth // 2 - o                          # annotated slice's index in the crop
+            yl = np.full((y.shape[0], y.shape[1], D, 1), 2.0, dtype=np.float32)   # ignore everywhere
+            yl[:, :, r, 0] = y[:, :, 0]                              # real label only on the annotated slice
+            y = yl
+        return x, y
 
     @staticmethod
     def _augment_brightness(x, y):
@@ -174,8 +196,9 @@ class SEModelDataLoader:
             x = np.flip(x, axis=0)
             y = np.flip(y, axis=0)
         if SEModelDataLoader.AUG_FLIP_Z[_] and self.box_depth > 1:
-            x = np.flip(x, axis=-1)
-            y = np.flip(y, axis=-1)
+            x = np.flip(x, axis=2)             # x: (H,W,D) -> flip Z
+            if y.ndim == 4:                    # slab label (H,W,D,1) -> flip Z too (keeps label aligned)
+                y = np.flip(y, axis=2)
 
         if self.extra_augmentations:
             x, y = SEModelDataLoader._extra_augmentations(x, y)
@@ -211,18 +234,23 @@ class SEModelDataLoader:
                 x, y = self.preprocess(x, y)
                 yield x, y
 
+    def _y_signature(self):
+        if self.slab:   # slab label matches the model's (Y, X, Z, 1) output
+            return tf.TensorSpec(shape=(self.box_shape, self.box_shape, self.box_depth, 1), dtype=tf.float32)
+        return tf.TensorSpec(shape=(self.box_shape, self.box_shape, 1), dtype=tf.float32)
+
     def as_generator(self, validation=False):
         if validation:
             while self.batch_size > len(self.idx_validation_all):
                 self.batch_size = self.batch_size // 2
             n_steps = len(self.idx_validation_all) // self.batch_size
-            dataset = tf.data.Dataset.from_generator(self.validation_generator, output_signature=(tf.TensorSpec(shape=(self.box_shape, self.box_shape, self.box_depth), dtype=tf.float32), tf.TensorSpec(shape=(self.box_shape, self.box_shape, 1), dtype=tf.float32))).batch(batch_size=self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+            dataset = tf.data.Dataset.from_generator(self.validation_generator, output_signature=(tf.TensorSpec(shape=(self.box_shape, self.box_shape, self.box_depth), dtype=tf.float32), self._y_signature())).batch(batch_size=self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
         else:
             while self.batch_size > len(self.idx_training_all):
                 self.batch_size = self.batch_size // 2
 
             n_steps = len(self.idx_training_all) // self.batch_size
-            dataset = tf.data.Dataset.from_generator(self.training_generator, output_signature=(tf.TensorSpec(shape=(self.box_shape, self.box_shape, self.box_depth), dtype=tf.float32), tf.TensorSpec(shape=(self.box_shape, self.box_shape, 1), dtype=tf.float32))).batch(batch_size=self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+            dataset = tf.data.Dataset.from_generator(self.training_generator, output_signature=(tf.TensorSpec(shape=(self.box_shape, self.box_shape, self.box_depth), dtype=tf.float32), self._y_signature())).batch(batch_size=self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
         return dataset, n_steps
 
@@ -279,6 +307,8 @@ class SEModel:
         self.info_short = ""
         self.loss = 0.0
         self.normalization = None  # None = legacy per-box/per-slice; else global
+        self.z_jitter = 0          # slab models: trained Z-position jitter (= reliable output half-range*2)
+        self.tta = 1               # per-model test-time augmentation multiplicity (1-8)
         self.data = None
         if not no_glfw:
             self.texture = Texture(format="r32f")
@@ -336,7 +366,9 @@ class SEModel:
                 'emit': self.emit,
                 'absorb': self.absorb,
                 'loss': self.loss,
-                'normalization': self.normalization
+                'normalization': self.normalization,
+                'z_jitter': self.z_jitter,
+                'tta': self.tta
             }
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f)
@@ -408,6 +440,8 @@ class SEModel:
                 self.absorb = metadata['absorb']
                 self.loss = metadata['loss']
                 self.normalization = metadata.get('normalization', None)  # absent => legacy
+                self.z_jitter = metadata.get('z_jitter', 0)
+                self.tta = metadata.get('tta', 1)
 
                 # a CLI-trained model keeps a default model colour; if its title matches a feature
                 # in the active library, adopt that feature's colour (don't touch custom colours).
@@ -459,6 +493,15 @@ class SEModel:
                     self.compile(loader.box_shape, loader.box_depth)
                 if restore_weights is not None:
                     self.model.set_weights(restore_weights)
+
+                # model type now known: rank-5 output => Z-slab model. It needs the loader to
+                # random-crop + build masked slab labels (Z-position jitter); carry the jitter onto
+                # the model so inference knows the reliable output range.
+                loader.slab = (len(self.model.output_shape) == 5)
+                self.z_jitter = loader.z_jitter
+                if loader.slab and loader.z_jitter == 0:
+                    print("Warning: 3D slab model trained on data with no Z-jitter (z_jitter=0) - only "
+                          "the central slice will be well-supervised. Re-extract at a slab --box-depth.")
 
                 learning_rate = rate if rate is not None else cfg.settings["LEARNING_RATE"]
                 self.model.optimizer.learning_rate.assign(learning_rate)
@@ -617,10 +660,31 @@ class SEModel:
         out_image = out_image[:w, :h]
         return out_image
 
+    def is_3d(self):
+        # a slab model has a rank-5 input (Y, X, Z, C); these always tile at inference
+        return self.model is not None and len(self.model.input_shape) == 5
+
+    def _run(self, x):
+        """Run the compiled model on x=(B, Y, X, D) and return (B, Y, X). A 3D model wants a
+        trailing channel (B, Y, X, D, 1); its loaded inference graph fixes batch=1 (Conv3DTranspose),
+        so run it one sample at a time, and reduce a slab output to its central Z slice (the GUI
+        only ever shows the current slice)."""
+        if len(self.model.input_shape) == 5:
+            outs = []
+            for b in range(x.shape[0]):
+                o = self.model.predict(x[b][np.newaxis, ..., np.newaxis], verbose=0)   # (1,Y,X,D,1) or (1,Y,X,1)
+                if o.ndim == 5:
+                    o = o[:, :, :, o.shape[3] // 2, :]     # slab -> central Z slice
+                outs.append(o[0])                          # (Y, X, 1)
+            return np.squeeze(np.stack(outs, axis=0), axis=-1)   # (B, Y, X)
+        out = self.model.predict(x, verbose=0)             # (B, Y, X, 1)
+        return np.squeeze(out, axis=-1)                    # (B, Y, X)
+
     def apply_to_slice(self, image, pixel_size, norm_stats=None):
         # as of 251125: we always expect image to be a 3D numpy array; it is Z, Y, X when coming in to this function, but note that the models expects Z last.
 
-        if self.compilation_mode == 'training' and self.background_process_train is None and cfg.settings["TILED_MODE"]==0:
+        is_3d = (len(self.model.input_shape) == 5)   # 3D slab models always tile (a full slice is too big in 3D)
+        if self.compilation_mode == 'training' and self.background_process_train is None and (cfg.settings["TILED_MODE"] == 0 or is_3d):
             self.toggle_inference()
 
         start_time = time.time()
@@ -647,7 +711,7 @@ class SEModel:
             center, scale = norm_stats if norm_stats is not None else global_stats(np.transpose(image, (2, 0, 1)))
             image = (image - center) / scale
 
-        if self.compilation_mode == 'inference' and cfg.settings["TILED_MODE"]==0:
+        if self.compilation_mode == 'inference' and cfg.settings["TILED_MODE"]==0 and not is_3d:
             if not global_norm:   # legacy: whole-slice
                 image -= np.mean(image)
                 image /= np.std(image) + 1e-7
@@ -664,7 +728,7 @@ class SEModel:
             _flip = [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1]
             _flip_z = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]
 
-            _tta = cfg.settings['TEST_TIME_AUGMENTATIONS'] if image_depth > 1 else min(cfg.settings['TEST_TIME_AUGMENTATIONS'], 8)
+            _tta = self.tta if image_depth > 1 else min(self.tta, 8)
             for i in range(_tta):
                 # rotate and flip
                 tta_img = np.rot90(image, k=_rot[i], axes=(0, 1))
@@ -673,7 +737,7 @@ class SEModel:
                 if _flip_z[i]:
                     tta_img = np.flip(tta_img, axis=2)
 
-                tta_img_segmented = np.squeeze(self.model.predict(tta_img[np.newaxis, ...], verbose=0))
+                tta_img_segmented = self._run(tta_img[np.newaxis, ...])[0]
 
                 # undo rotation and flip
                 if _flip[i]:
@@ -682,12 +746,27 @@ class SEModel:
 
                 segmentation += tta_img_segmented
             segmentation = segmentation[pad_h//2:pad_h//2+j, pad_w//2:pad_w//2+k] / _tta
-            print(self.info + f" cost for {segmentation.shape[0]}x{segmentation.shape[1]} slice: {time.time() - start_time:.3f} s (multiplicity {cfg.settings['TEST_TIME_AUGMENTATIONS']}).")
-        else:  # original Ais in-gui segmentation way
-            boxes, image_size, padding, stride = self.slice_to_boxes(image, pixel_size)
-            seg_boxes = np.squeeze(self.model.predict(boxes, verbose=0))
-            segmentation = self.boxes_to_slice(seg_boxes, image_size, pixel_size, padding, stride)
-            print(self.info + f" cost for {segmentation.shape[0]}x{segmentation.shape[1]} slice ({boxes.shape[0]} boxes): {time.time()-start_time:.3f} s.")
+            print(self.info + f" cost for {segmentation.shape[0]}x{segmentation.shape[1]} slice: {time.time() - start_time:.3f} s (multiplicity {self.tta}).")
+        else:  # tiled inference (also used for every 3D model); TTA wraps the tiled pass
+            _rot = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
+            _flip = [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1]
+            _flip_z = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]
+            _tta = self.tta if image_depth > 1 else min(self.tta, 8)
+            segmentation = None
+            for i in range(_tta):
+                tta_img = np.rot90(image, k=_rot[i], axes=(0, 1))
+                if _flip[i]:
+                    tta_img = np.flip(tta_img, axis=0)
+                if _flip_z[i]:
+                    tta_img = np.flip(tta_img, axis=2)
+                boxes, image_size, padding, stride = self.slice_to_boxes(tta_img, pixel_size)
+                seg_i = self.boxes_to_slice(self._run(boxes), image_size, pixel_size, padding, stride)
+                if _flip[i]:
+                    seg_i = np.flip(seg_i, axis=0)
+                seg_i = np.rot90(seg_i, k=-_rot[i], axes=(0, 1))
+                segmentation = seg_i if segmentation is None else segmentation + seg_i
+            segmentation = segmentation / _tta
+            print(self.info + f" cost for {segmentation.shape[0]}x{segmentation.shape[1]} slice (tiled, tta {_tta}): {time.time()-start_time:.3f} s.")
 
         if cfg.settings["INFERENCE_ALLOW_RESCALING"] and tomo_rescaled:
             seg_rescaled = resize(segmentation, [orig_y, orig_x], order=1, anti_aliasing=True)

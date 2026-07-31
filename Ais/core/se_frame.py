@@ -166,7 +166,7 @@ class SEFrame:
         if model_depth is None:
             out_data = mrc.data[requested_slice, :, :]
         else:
-            stack_indices = np.clip(np.arange(requested_slice - model_depth // 2, requested_slice + model_depth // 2 + 1), 0, self.n_slices - 1)
+            stack_indices = np.clip(np.arange(requested_slice - model_depth // 2, requested_slice - model_depth // 2 + model_depth), 0, self.n_slices - 1)
             out_data = mrc.data[stack_indices, :, :]
         if as_float:
             target_type_dict = {np.float32: float, float: float, np.dtype('int8'): np.dtype('uint8'), np.dtype('int16'): np.dtype('float32')}

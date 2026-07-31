@@ -68,13 +68,25 @@ def _bin(arr, binning, anti_aliasing=True):
                   order=1 if anti_aliasing else 0)
 
 
+def _scale_xy(arr, out_xy, anti_aliasing=True):
+    """Resize the XY of a (Z, H, W) array to (Z, out_xy, out_xy), Z preserved. Uses the same
+    anti-aliased skimage resize as inference's scale_volume_xy (order=1) - or nearest (order=0)
+    for label patches, so ignore/label values survive. No-op when already the right size."""
+    out_xy = int(out_xy)
+    if arr.shape[-1] == out_xy and arr.shape[-2] == out_xy:
+        return arr
+    return resize(arr, (arr.shape[0], out_xy, out_xy), anti_aliasing=anti_aliasing,
+                  preserve_range=True, order=1 if anti_aliasing else 0)
+
+
 def extract_box(data, z, y, x, box_size, box_depth, n_slices):
     """Extract a (box_depth, box_size, box_size) box centred on (z, y, x) from a
     3D volume (Z, Y, X). Out-of-plane indices are clamped; in-plane the box is
     reflect-padded at the edges, and a validity mask marks the padded region."""
     box_size = int(box_size)
     box_depth = int(box_depth)
-    z_indices = np.clip(np.arange(z - box_depth // 2, z + box_depth // 2 + 1), 0, n_slices - 1)
+    # exactly box_depth slices with the annotated slice z at index box_depth//2 (odd or even)
+    z_indices = np.clip(np.arange(z - box_depth // 2, z - box_depth // 2 + box_depth), 0, n_slices - 1)
     zdim, ydim, xdim = data.shape
 
     depth = len(z_indices)
@@ -280,17 +292,20 @@ def extract_box_task(task):
     """Worker: extract and write all flavours + label for one box.
 
     task keys: group, hash, flavour_paths{name:path}, annotated_flavour, z, y, x,
-               box_size, box_depth, label_patch (ndarray or None), is_negative,
-               margin_per_side, source.
-    ctx keys (via init_extract_worker): staging_root, binning, apix.
+               box_size (NATIVE extraction size in px), out_box_size (final size after resampling
+               to the target apix), box_depth, label_patch (ndarray or None), is_negative,
+               margin_per_side (in native px), source.
+    ctx keys (via init_extract_worker): staging_root, apix (the target pixel size).
+    The box is extracted at the tomogram's native scale, then resampled in XY to out_box_size
+    (Z preserved) so every box lands at the target apix regardless of the tomogram's own apix.
     Returns (group, hash, source) on success, or None if the box was skipped.
     """
     ctx = _extract_worker_ctx
     staging_root = ctx['staging_root']
-    binning = ctx['binning']
     apix = ctx['apix']
 
-    box_size = int(task['box_size'])
+    box_size = int(task['box_size'])            # native extraction size (px)
+    out_box_size = int(task['out_box_size'])    # final size after XY resample to target apix
     box_depth = int(task['box_depth'])
     z, y, x = task['z'], task['y'], task['x']
     group_dir = os.path.join(staging_root, task['group'])
@@ -307,7 +322,7 @@ def extract_box_task(task):
         if flavour == ann:
             validity = val
         box = (box - center) / scale
-        box = _bin(box, binning)
+        box = _scale_xy(box, out_box_size)
         out_dir = os.path.join(group_dir, flavour)
         os.makedirs(out_dir, exist_ok=True)
         with mrcfile.new(os.path.join(out_dir, task['hash'] + '.mrc'), overwrite=True) as m:
@@ -329,7 +344,7 @@ def extract_box_task(task):
         label[-m_per:, :] = 2
         label[:, :m_per] = 2
         label[:, -m_per:] = 2
-    label = _bin(label[None, :, :], binning, anti_aliasing=False)[0]
+    label = _scale_xy(label[None, :, :], out_box_size, anti_aliasing=False)[0]
 
     y_dir = os.path.join(group_dir, LABEL_DIR)
     os.makedirs(y_dir, exist_ok=True)
@@ -341,9 +356,10 @@ def extract_box_task(task):
 
 
 def pack_staging_dir(staging_dir, out_path, apix, features, sources,
-                     annotated_flavour=DEFAULT_ANNOTATED_FLAVOUR):
-    """Write metadata.json + sources.json into a worker-populated staging dir and
-    tar it into a .scnt. box_size / box_depth are read back from the written files."""
+                     annotated_flavour=DEFAULT_ANNOTATED_FLAVOUR, z_jitter=0):
+    """Write metadata.json + sources.json into a worker-populated staging dir and tar it into a
+    .scnt. box_size is read from the files; the files are (box_depth + z_jitter) slices deep, so
+    box_depth (the model depth) is that minus z_jitter (extra Z context for training augmentation)."""
     input_flavours = sorted(
         d for d in os.listdir(staging_dir)
         if d.startswith(INPUT_PREFIX) and os.path.isdir(os.path.join(staging_dir, d))
@@ -354,13 +370,15 @@ def pack_staging_dir(staging_dir, out_path, apix, features, sources,
     box_size = int(mrcfile.read(os.path.join(label_dir, label_files[0])).shape[-1])
     a_flavour = annotated_flavour if annotated_flavour in input_flavours else input_flavours[0]
     one_input = next(f for f in os.listdir(os.path.join(staging_dir, a_flavour)) if f.endswith('.mrc'))
-    box_depth = int(mrcfile.read(os.path.join(staging_dir, a_flavour, one_input)).shape[0])
+    stored_depth = int(mrcfile.read(os.path.join(staging_dir, a_flavour, one_input)).shape[0])
+    box_depth = stored_depth - int(z_jitter)   # model depth; the extra z_jitter slices are Z-context
 
     metadata = {
         'format_version': FORMAT_VERSION,
         'apix': float(apix),
         'box_size': box_size,
         'box_depth': box_depth,
+        'z_jitter': int(z_jitter),
         'features': list(features),
         'n_samples': n_samples,
         'input_flavours': input_flavours,
@@ -472,7 +490,9 @@ class ScntTrainingSet:
                     self._flavours_for[h].append(flavour)
 
         first_in = self._read_input(self.hashes[0], self.annotated_flavour)
-        self.box_depth = int(meta.get('box_depth', first_in.shape[0]))
+        self.stored_depth = int(first_in.shape[0])                        # actual slices per box
+        self.z_jitter = int(meta.get('z_jitter', 0))                     # extra Z-context for jitter
+        self.box_depth = int(meta.get('box_depth', self.stored_depth))   # model depth (stored - jitter)
         self.box_shape = int(meta.get('box_size', self._read_label(self.hashes[0]).shape[0]))
         self.apix = float(meta.get('apix', -1.0))
         if self.apix < 0:
@@ -571,6 +591,8 @@ class PooledTrainingSet:
                              f"({dims}). Re-extract them with matching --box-size and --box-depth.")
         self.box_shape = self.sets[0].box_shape
         self.box_depth = self.sets[0].box_depth
+        self.z_jitter = getattr(self.sets[0], 'z_jitter', 0)
+        self.stored_depth = getattr(self.sets[0], 'stored_depth', self.box_depth)
 
         apixes = [s.apix for s in self.sets]
         self.apix = apixes[0]
@@ -648,6 +670,8 @@ class LegacyTiffTrainingSet:
         self._x = np.transpose(data[:, :-1, :, :], (0, 2, 3, 1))   # (N, H, W, D)
         self._y = data[:, -1, :, :, None]                          # (N, H, W, 1)
         self.n_samples, self.box_shape, _, self.box_depth = self._x.shape
+        self.z_jitter = 0
+        self.stored_depth = self.box_depth
         self.input_flavours = [DEFAULT_ANNOTATED_FLAVOUR]
         self.annotated_flavour = DEFAULT_ANNOTATED_FLAVOUR
         self.normalization = None   # legacy per-box

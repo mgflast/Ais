@@ -38,8 +38,8 @@ def masked_bce(y_true, y_pred, border=0, ignore_label=2.0, epsilon=1e-6):
     mask = tf.cast(tf.not_equal(y_true, ignore_label), tf.float32)
     y_true_clean = tf.where(tf.equal(y_true, ignore_label), 0.0, y_true)
 
-    bce = tf.keras.losses.binary_crossentropy(y_true_clean, y_pred)  # [B, H, W]
-    mask_bce = tf.squeeze(mask, axis=-1) if mask.shape.rank == 4 else mask
+    bce = tf.keras.losses.binary_crossentropy(y_true_clean, y_pred)  # drops the channel axis
+    mask_bce = tf.squeeze(mask, axis=-1)   # match bce; works for 2D (B,H,W,1) and slab (B,H,W,D,1)
 
     return tf.reduce_sum(bce * mask_bce) / (tf.reduce_sum(mask_bce) + epsilon)
 

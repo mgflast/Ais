@@ -1,4 +1,5 @@
-import os, time, multiprocessing, glob, itertools, glfw, mrcfile, json, random
+import os, sys, time, shutil, multiprocessing, glob, itertools, glfw, mrcfile, json, random
+from collections import Counter
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # suppress TF C++ INFO and WARNING before import
 from Ais.core.se_frame import SEFrame
 from Ais.core.se_model import SEModel
@@ -52,12 +53,61 @@ def _parse_input_for_slice(input_volume, j, model_depth, model_dimensionality):
     if model_dimensionality == 2 or model_depth <= 1:
         return input_volume[np.clip(j, 0, n_slices - 1)][..., np.newaxis]
     half = model_depth // 2
-    idx = np.clip(np.arange(j - half, j + half + 1), 0, n_slices - 1)
+    idx = np.clip(np.arange(j - half, j - half + model_depth), 0, n_slices - 1)
     slab = input_volume[idx, :, :]
     if model_dimensionality == 3:
         return np.transpose(slab, (1, 2, 0))[..., np.newaxis]
     else:
         return np.transpose(slab, (1, 2, 0))
+
+
+def _infer_slab(model, vi, depth, z_start, z_end, batch_size, jitter_half=0):
+    """Slab (3D) inference for a model that emits a full Z-slab: tile [z_start, z_end) into
+    overlapping depth-`depth` slabs, run each, and blend the outputs in Z. Each slab slice is
+    weighted by a trapezoid peaking over the trained reliable range [center +/- jitter_half]
+    (uniform if jitter_half == 0). vi is (Z, Y, X); slices outside [z_start, z_end) are left at 0."""
+    nz = vi.shape[0]
+    stride = max(1, depth // 2)   # 50% Z overlap -> each slice covered by ~2 slabs
+    if nz <= depth:
+        starts = [0]
+    else:
+        hi_start = max(0, min(z_end, nz) - depth)
+        starts = list(range(min(z_start, hi_start), hi_start + 1, stride))
+        if starts[-1] != hi_start:
+            starts.append(hi_start)
+
+    # only the trained output positions [centre +/- jitter_half] contribute; positions outside that
+    # range were never supervised (they saturate to garbage/all-ones), so weight them 0. Volume
+    # top/bottom slices that only have untrained coverage then come out 0 (trims the all-ones margins).
+    if jitter_half > 0:
+        d = np.abs(np.arange(depth) - depth // 2)
+        w = (d <= jitter_half).astype(np.float32)
+    else:
+        w = np.ones(depth, dtype=np.float32)
+
+    acc = np.zeros_like(vi, dtype=np.float32)
+    cnt = np.zeros(nz, dtype=np.float32)
+    for bs in range(0, len(starts), batch_size):
+        chunk = starts[bs:bs + batch_size]
+        slabs = []
+        for z0 in chunk:
+            slab = vi[z0:z0 + depth]
+            if slab.shape[0] < depth:   # volume thinner than one slab
+                slab = np.pad(slab, ((0, depth - slab.shape[0]), (0, 0), (0, 0)), mode='reflect')
+            slabs.append(np.transpose(slab, (1, 2, 0))[..., np.newaxis])   # (Y, X, depth, 1)
+        out = np.squeeze(model(np.stack(slabs), training=False).numpy(), axis=-1)   # (B, Y, X, depth)
+        for i, z0 in enumerate(chunk):
+            z1 = min(z0 + depth, nz)
+            d = z1 - z0
+            acc[z0:z1] += w[:d, None, None] * np.transpose(out[i], (2, 0, 1))[:d]
+            cnt[z0:z1] += w[:d]
+
+    si = np.zeros_like(vi, dtype=np.float32)
+    m = cnt > 0
+    si[m] = acc[m] / cnt[m][:, None, None]
+    si[:z_start] = 0.0
+    si[z_end:] = 0.0
+    return si
 
 
 def _preprocess_tomo(tomo_path, model_apix, normalization=None):
@@ -137,6 +187,9 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
 
     new_model = clone_model(model, input_tensors=new_input)
     new_model.set_weights(model.get_weights())
+    # a slab model emits a full Z-slab (rank-5 output); it needs Z-tiled slab inference rather
+    # than the per-slice window loop.
+    is_slab = (len(new_model.output_shape) == 5)
 
     import threading
     import queue as _queue
@@ -238,12 +291,15 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
                 n_center = max(1, int(round(n_z * frac)))
                 z_start = (n_z - n_center) // 2
                 z_end = z_start + n_center
-                for bs in range(z_start, z_end, batch_size):
-                    bjs = list(range(bs, min(bs + batch_size, z_end)))
-                    inp = np.stack([_parse_input_for_slice(vi, bj, model_depth, model_dimensionality) for bj in bjs])
-                    res = new_model(inp, training=False).numpy()
-                    for i, bj in enumerate(bjs):
-                        si[bj] = np.squeeze(res[i])
+                if is_slab:
+                    si = _infer_slab(new_model, vi, model_depth, z_start, z_end, batch_size, se_model.z_jitter // 2)
+                else:
+                    for bs in range(z_start, z_end, batch_size):
+                        bjs = list(range(bs, min(bs + batch_size, z_end)))
+                        inp = np.stack([_parse_input_for_slice(vi, bj, model_depth, model_dimensionality) for bj in bjs])
+                        res = new_model(inp, training=False).numpy()
+                        for i, bj in enumerate(bjs):
+                            si[bj] = np.squeeze(res[i])
                 if f[k]: si = np.flip(si, axis=2)
                 si = np.rot90(si, k=-r[k], axes=(1, 2))
                 seg += _remove_padding(si, padding)
@@ -391,9 +447,9 @@ def resolve_model_architecture(architecture):
         print_available_model_architectures()
         exit(1)
 
-    # a model title; match case-insensitively and tolerant of underscores / extra whitespace
+    # a model title; match case-insensitively, treating '-', '_' and whitespace as equivalent
     def normalize(text):
-        return " ".join(str(text).replace("_", " ").split()).lower()
+        return " ".join(str(text).replace("_", " ").replace("-", " ").split()).lower()
 
     target = normalize(architecture)
     for j, title in enumerate(SEModel.AVAILABLE_MODELS):
@@ -631,7 +687,85 @@ def _find_flavours(tomo_path):
     return flavours
 
 
-def extract_training_data(features, data_directory, output_directory, box_size, box_depth, binning=1, exclude=None, merge=False, coordinates=False, apix=None, easymode=False):
+class _ScanDisplay:
+    """Live multi-line console region for `ais extract` scanning: a tqdm-style progress bar over
+    the annotated tomograms plus one in-place 'boxes found' line per feature, rewritten with ANSI
+    cursor moves (this module already uses ANSI colour). The bar string is produced by tqdm's own
+    format_meter() so it matches the extraction bar exactly (same glyphs, %, it/s, elapsed<eta).
+    Non-TTY: prints one summary at the end instead of animating."""
+
+    def __init__(self, total, features, annotated_flavour):
+        self.total = max(1, total)
+        self.features = list(features)
+        self.main = annotated_flavour
+        self.namew = max((len(f) for f in self.features), default=0)
+        self.n = 0
+        self.box = {f: 0 for f in self.features}
+        self.tomos = {f: 0 for f in self.features}
+        self.flav = {f: Counter() for f in self.features}
+        self.tty = sys.stdout.isatty()
+        self.nlines = 1 + len(self.features)
+        self.t0 = time.time()
+        self._drawn = False
+        # format_meter() defaults to Unicode block glyphs; fall back to ASCII when the stream
+        # can't encode them (matches how the tqdm object behaves on a non-UTF console).
+        try:
+            from tqdm.utils import _supports_unicode
+            self.ascii = not _supports_unicode(sys.stdout)
+        except Exception:
+            self.ascii = 'utf' not in ((getattr(sys.stdout, 'encoding', '') or '').lower())
+
+    @staticmethod
+    def _ncols():
+        return max(20, shutil.get_terminal_size(fallback=(100, 24)).columns - 1)
+
+    def _bar_line(self, ncols):
+        from tqdm import tqdm as _tqdm
+        return _tqdm.format_meter(self.n, self.total, time.time() - self.t0, ncols=ncols,
+                                  prefix='scanning tomograms', unit='tomo', ascii=self.ascii)
+
+    def _feat_line(self, f, ncols):
+        unit = 'tomogram' if self.tomos[f] == 1 else 'tomograms'
+        txt = f"{f + ':':<{self.namew + 1}} {self.box[f]:>7} boxes found in {self.tomos[f]} {unit}"
+        extras = sorted(k for k in self.flav[f] if k != self.main)
+        if extras:
+            parts = [f"{self.main} {self.flav[f][self.main]}"] + [f"{k} {self.flav[f][k]}" for k in extras]
+            txt += f"  (flavours: {', '.join(parts)})"
+        if len(txt) > ncols:
+            ell = '...' if self.ascii else '…'
+            txt = txt[:max(0, ncols - len(ell))] + ell
+        return f"\033[96m{txt}\033[0m"
+
+    def _render(self):
+        ncols = self._ncols()
+        out = f"\033[{self.nlines}A" if self._drawn else ""
+        for ln in [self._bar_line(ncols)] + [self._feat_line(f, ncols) for f in self.features]:
+            out += "\033[2K" + ln + "\n"
+        sys.stdout.write(out); sys.stdout.flush()
+        self._drawn = True
+
+    def start_tomo(self):
+        self.n += 1
+        if self.tty:
+            self._render()
+
+    def add(self, feature, nboxes, flavours):
+        self.box[feature] += nboxes
+        self.tomos[feature] += 1
+        for fl in flavours:
+            self.flav[feature][fl] += nboxes
+
+    def finish(self):
+        if self.tty:
+            self._render()
+        else:
+            ncols = self._ncols()
+            print(self._bar_line(ncols))
+            for f in self.features:
+                print(self._feat_line(f, ncols))
+
+
+def extract_training_data(features, data_directory, output_directory, box_size, box_depth, exclude=None, merge=False, coordinates=False, apix=10.0, easymode=False):
     import pickle, tempfile, shutil
     import starfile, pandas as pd
     import Ais.core.se_scnt as se_scnt
@@ -639,6 +773,11 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
     from collections import Counter
 
     MERGED_GROUP = "__merged__"
+    # for any slab (box_depth > 1) store 4 extra slices top & bottom, so 3D training can jitter the
+    # annotated slice's Z-position within the box (breaks the "only the centre slice is learned"
+    # failure mode). box_depth stays the MODEL depth; the .scnt just carries the extra context.
+    Z_JITTER = 8 if box_depth > 1 else 0
+    stored_depth = box_depth + Z_JITTER
     annotated_tomograms = glob.glob(os.path.join(data_directory, "*.scns"))
 
     excluded_files = []
@@ -658,24 +797,23 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
     coord_rows = {f: [] for f in features} if coordinates else None
     tasks = []                                   # one task per box (for parallel extraction)
     feature_box_count = {f: 0 for f in features}
-
-    if apix is not None:
-        print(f'Using user-specified pixel size of {apix} A')
+    notes = []                                   # warnings/info, emitted below the live region
+    disp = _ScanDisplay(len(annotated_tomograms), features, se_scnt.DEFAULT_ANNOTATED_FLAVOUR)
+    apix = float(apix)   # target pixel size for the extracted boxes (written to header + filename)
 
     # ---- scout: load every .scns, collect box coordinates + label patches ----
-    for j, annotation in enumerate(annotated_tomograms, start=1):
+    for annotation in annotated_tomograms:
+        disp.start_tomo()
         stem = os.path.splitext(os.path.basename(annotation))[0]
         if stem in excluded_files:
-            print('\033[38;5;208m' + f'{j}/{len(annotated_tomograms)} - {os.path.basename(annotation)} - excluded' + '\033[0m')
+            notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)} - excluded' + '\033[0m')
             continue
-
-        print('\033[93m' + f'{j}/{len(annotated_tomograms)} - {os.path.basename(annotation)}' + '\033[0m')
 
         try:
             with open(annotation, 'rb') as pf:
                 se_frame = pickle.load(pf)
         except Exception as e:
-            print(f"\terror loading {j}\n\t{e}")
+            notes.append(f"error loading {os.path.basename(annotation)}: {e}")
             continue
 
         tomo = se_frame.path
@@ -684,24 +822,33 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
 
         tomo_stem = os.path.splitext(os.path.basename(tomo))[0]
         if tomo_stem in excluded_files:
-            print('\033[38;5;208m' + f'{j}/{len(annotated_tomograms)} - {os.path.basename(annotation)} - excluded' + '\033[0m')
+            notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)} - excluded' + '\033[0m')
             continue
 
         if not coordinates and not os.path.exists(tomo):
-            print('\033[38;5;208m' + f'\ttomogram not found at {tomo} - skipping' + '\033[0m')
+            notes.append('\033[38;5;208m' + f'tomogram not found at {tomo} - skipping' + '\033[0m')
             continue
 
-        if apix is None:
-            apix = mrcfile.open(tomo, header_only=True).voxel_size.x
-            print(f'Pixel size for the first tomogram is {apix} Å - writing this value to the training data metadata.')
         tomo_mrc_name = os.path.basename(tomo).split("__")[0] + ".mrc"
+
+        # native pixel size from this tomogram's header; each box is extracted at native scale then
+        # resampled in XY to the target --apix (Z preserved, matching inference), so mixed-apix
+        # tomograms land on a common grid. When native ~= target (<5%) the box is kept as-is.
+        native_bs = int(box_size)
+        if not coordinates:
+            native_apix = float(mrcfile.open(tomo, header_only=True).voxel_size.x)
+            if native_apix <= 0 or abs(native_apix - 1.0) < 1e-6:
+                notes.append('\033[38;5;208m' + f'{os.path.basename(tomo)}: header pixel size {native_apix} A/px looks unset; treating as --apix {apix:.2f} (no rescale)' + '\033[0m')
+                native_apix = apix
+            if abs(native_apix / apix - 1.0) >= 0.05:
+                native_bs = int(round(box_size * apix / native_apix))
 
         if coordinates:
             for f in se_frame.features:
                 if f.title not in features:
                     continue
                 box_coordinates = [(z, box[0], box[1]) for z in f.boxes for box in f.boxes[z]]
-                print('\033[96m' + f"\tparsing feature '{f.title}' ({len(box_coordinates)} boxes)" + '\033[0m')
+                disp.add(f.title, len(box_coordinates), [])
                 for z, k, l in box_coordinates:
                     coord_rows[f.title].append({
                         'rlnCoordinateZ': z,
@@ -718,8 +865,8 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
         for f in se_frame.features:
             if f.title not in features:
                 continue
-            ann_bs = getattr(f, 'box_size', box_size)
-            margin_per_side = max(0, (box_size - ann_bs) // 2)
+            ann_bs = getattr(f, 'box_size', native_bs)
+            margin_per_side = max(0, (native_bs - ann_bs) // 2)   # native px; scaled with the label
             box_coordinates = [(z, b[0], b[1]) for z in f.boxes if f.boxes[z] for b in f.boxes[z]]
             if not box_coordinates:
                 continue
@@ -728,12 +875,11 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
                 flavour_paths = {se_scnt.DEFAULT_ANNOTATED_FLAVOUR: tomo}
                 if easymode:
                     flavour_paths.update(_find_flavours(tomo))
-                print('\033[96m' + f"\tflavours: {', '.join(flavour_paths.keys())}" + '\033[0m')
-            print('\033[96m' + f"\tparsing feature '{f.title}' ({len(box_coordinates)} boxes, annotation_box={ann_bs}, margin={margin_per_side})" + '\033[0m')
+            disp.add(f.title, len(box_coordinates), flavour_paths.keys())
             group = MERGED_GROUP if merge else f.title
             for z, x, y in box_coordinates:
                 if z in f.slices and f.slices[z] is not None:
-                    label_patch = se_scnt.extract_label(f, z, y, x, box_size)
+                    label_patch = se_scnt.extract_label(f, z, y, x, native_bs)
                 else:
                     label_patch = None
                 tasks.append({
@@ -742,7 +888,8 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
                     'flavour_paths': dict(flavour_paths),
                     'annotated_flavour': se_scnt.DEFAULT_ANNOTATED_FLAVOUR,
                     'z': int(z), 'y': int(y), 'x': int(x),
-                    'box_size': int(box_size), 'box_depth': int(box_depth),
+                    'box_size': int(native_bs), 'out_box_size': int(box_size),
+                    'box_depth': int(stored_depth),
                     'label_patch': label_patch,
                     'is_negative': False,
                     'margin_per_side': margin_per_side,
@@ -758,6 +905,11 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
                     },
                 })
                 feature_box_count[f.title] += 1
+
+    disp.finish()
+    for note in notes:
+        print(note)
+    print()
 
     os.makedirs(output_directory, exist_ok=True)
 
@@ -788,68 +940,71 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
         print('\033[96mNo training boxes for any feature. Skipping export.\033[0m')
         return
 
-    _binning_tag = "" if binning == 1 else f"_bin{binning}"
-    apix_final = apix * binning
+    apix_final = apix   # boxes are resampled to the target apix, so the .scnt is at this scale
+    _apix_tag = f"_{apix_final:.2f}Apx"
 
-    # ---- dispatch: extract every box (parallel), staging per-box mrc to a temp dir ----
+    # ---- dispatch: extract boxes one feature at a time, saving each feature's .scnt as soon
+    # as it finishes. A single SHARED pool is reused across features (not one pool per feature)
+    # so the per-feature bar + incremental save don't pay the worker-spawn cost K times. ----
     n_proc = max(1, min(16, os.cpu_count() or 1, len(tasks)))
     staging_root = tempfile.mkdtemp(prefix='scnt_extract_')
-    ctx = {'staging_root': staging_root, 'binning': binning, 'apix': apix_final}
-    results = []
+    ctx = {'staging_root': staging_root, 'apix': apix_final}
+
+    # per-box flavour sets, for the "(x_main N, additional flavours ...)" report
+    hash_flavours = {t['hash']: tuple(t['flavour_paths'].keys()) for t in tasks}
+    _main = se_scnt.DEFAULT_ANNOTATED_FLAVOUR
+
+    def _flavour_detail(sources_dict):
+        c = Counter()
+        for h in sources_dict:
+            for flav in hash_flavours.get(h, ()):
+                c[flav] += 1
+        extras = sorted(k for k in c if k != _main)
+        if not extras:
+            return ""
+        return f" ({_main} {c.get(_main, 0)}, additional flavours {', '.join(f'{k} ({c[k]})' for k in extras)})"
+
+    # ordered work units: (label, staging-subdir/group key, .scnt name stem, feature list, tasks)
+    if merge:
+        names = [f for f in features if feature_box_count[f] > 0]
+        groups = [('Merged', MERGED_GROUP, "_".join(names), names, tasks)]
+    else:
+        groups = [(f, f, f, [f], [t for t in tasks if t['group'] == f]) for f in features]
+
     try:
         print('\033[96m' + f'extracting {len(tasks)} boxes using {n_proc} process(es)...' + '\033[0m')
-        if n_proc == 1:
+        pool = None if n_proc == 1 else multiprocessing.Pool(
+            processes=n_proc, initializer=se_scnt.init_extract_worker, initargs=(ctx,))
+        if pool is None:
             se_scnt.init_extract_worker(ctx)
-            for t in tqdm(tasks, desc='extracting boxes', unit='box'):
-                r = se_scnt.extract_box_task(t)
-                if r is not None:
-                    results.append(r)
-        else:
-            with multiprocessing.Pool(processes=n_proc, initializer=se_scnt.init_extract_worker, initargs=(ctx,)) as pool:
-                for r in tqdm(pool.imap_unordered(se_scnt.extract_box_task, tasks, chunksize=8),
-                              total=len(tasks), desc='extracting boxes', unit='box'):
-                    if r is not None:
-                        results.append(r)
-
-        group_sources = {}
-        for group, h, source in results:
-            group_sources.setdefault(group, {})[h] = source
-
-        # per-box flavour sets, for the "(x_main N, additional flavours ...)" report
-        hash_flavours = {t['hash']: tuple(t['flavour_paths'].keys()) for t in tasks}
-        _main = se_scnt.DEFAULT_ANNOTATED_FLAVOUR
-
-        def _flavour_detail(sources_dict):
-            c = Counter()
-            for h in sources_dict:
-                for flav in hash_flavours.get(h, ()):
-                    c[flav] += 1
-            extras = sorted(k for k in c if k != _main)
-            if not extras:
-                return ""
-            return f" ({_main} {c.get(_main, 0)}, additional flavours {', '.join(f'{k} ({c[k]})' for k in extras)})"
-
-        if merge:
-            names = [f for f in features if feature_box_count[f] > 0]
-            if MERGED_GROUP not in group_sources:
-                print('\033[96mNo training boxes extracted. Skipping export.\033[0m')
-            else:
-                merged_name = "_".join(names)
-                out_path = f"{box_size}x{box_size}x{box_depth}{_binning_tag}_{merged_name}.scnt"
-                print('\033[96m' + f'Merged: {len(group_sources[MERGED_GROUP])} training boxes{_flavour_detail(group_sources[MERGED_GROUP])} - saving as {out_path}' + '\033[0m')
-                se_scnt.pack_staging_dir(os.path.join(staging_root, MERGED_GROUP),
-                                         os.path.join(output_directory, out_path),
-                                         apix=apix_final, features=names, sources=group_sources[MERGED_GROUP])
-        else:
-            for f in features:
-                out_path = f"{box_size}x{box_size}x{box_depth}{_binning_tag}_{f}.scnt"
-                if f not in group_sources:
-                    print('\033[96m' + f'{f}: 0 training boxes. Skipping export.' + '\033[0m')
+        try:
+            for label, group_key, name_stem, feats_list, gtasks in groups:
+                out_path = f"{box_size}x{box_size}x{box_depth}{_apix_tag}_{name_stem}.scnt"
+                if not gtasks:
+                    print('\033[96m' + f'{label}: 0 training boxes. Skipping export.' + '\033[0m')
                     continue
-                print('\033[96m' + f'{f}: {len(group_sources[f])} training boxes{_flavour_detail(group_sources[f])} - saving as {out_path}' + '\033[0m')
-                se_scnt.pack_staging_dir(os.path.join(staging_root, f),
+                if pool is None:
+                    stream = (se_scnt.extract_box_task(t) for t in gtasks)
+                else:
+                    stream = pool.imap_unordered(se_scnt.extract_box_task, gtasks, chunksize=8)
+                sources = {}
+                for r in tqdm(stream, total=len(gtasks), desc=f'extracting {label}', unit='box'):
+                    if r is not None:
+                        _grp, h, source = r
+                        sources[h] = source
+                if not sources:
+                    print('\033[96m' + f'{label}: 0 training boxes extracted. Skipping export.' + '\033[0m')
+                    continue
+                print('\033[96m' + f'{label}: {len(sources)} training boxes{_flavour_detail(sources)} - saving as {out_path}' + '\033[0m')
+                se_scnt.pack_staging_dir(os.path.join(staging_root, group_key),
                                          os.path.join(output_directory, out_path),
-                                         apix=apix_final, features=[f], sources=group_sources[f])
+                                         apix=apix_final, features=feats_list, sources=sources,
+                                         z_jitter=Z_JITTER)
+                shutil.rmtree(os.path.join(staging_root, group_key), ignore_errors=True)
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
 
