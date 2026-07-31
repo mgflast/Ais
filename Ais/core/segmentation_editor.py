@@ -47,7 +47,7 @@ class SegmentationEditor:
     ACTIVE_SLICES_CHILD_HEIGHT = 140
     PROGRESS_BAR_HEIGHT = 8
     MODEL_PANEL_HEIGHT_TRAINING = 158
-    MODEL_PANEL_HEIGHT_PREDICTION = 145
+    MODEL_PANEL_HEIGHT_PREDICTION = 161
     MODEL_PANEL_HEIGHT_LOGIC = 115
 
     TOOLTIP_APPEAR_DELAY = 1.0
@@ -246,7 +246,6 @@ class SegmentationEditor:
         SegmentationEditor.FRAME_TEXTURE_REQUIRES_UPDATE |= True
         cfg.se_active_frame.slice_changed = True
         if len(cfg.se_frames) == 1:
-            SegmentationEditor.trainset_apix = cfg.se_active_frame.pixel_size * 10.0
             SegmentationEditor.seg_folder = os.path.dirname(cfg.se_active_frame.path)
         SegmentationEditor.renderer.fbo1.set_size(dataset.width, dataset.height)
         SegmentationEditor.renderer.fbo2.set_size(dataset.width, dataset.height)
@@ -556,6 +555,30 @@ class SegmentationEditor:
                     world_delta = np.array([-(world_pos_old[0] - world_pos[0]), world_pos_old[1] - world_pos[1]]) / cfg.se_active_frame.pixel_size
                     self.crop_handles[0].move_crop_roi(world_delta[0], world_delta[1])
 
+    @staticmethod
+    def _find_open_dataset(f):
+        """If f (a .mrc or .scns) is already represented by an open se_frame, return (frame, message)
+        so the caller can activate it and skip re-loading; otherwise (None, None). Identity is the
+        dataset stem (path minus extension, case/separator-insensitive), which is how a .mrc and its
+        .scns twin share one identity - see cfg._dataset_stem."""
+        ext = os.path.splitext(f)[1].lower()
+        f_stem = cfg._dataset_stem(f)
+        base = os.path.basename(f)
+        for fr in cfg.se_frames:
+            scns = getattr(fr, "scns_path", "n/a")
+            has_scns = isinstance(scns, str) and scns.lower().endswith(cfg.filetype_segmentation)
+            path_stem = cfg._dataset_stem(fr.path)
+            scns_stem = cfg._dataset_stem(scns) if has_scns else None
+            if ext == cfg.filetype_segmentation:
+                if has_scns and scns_stem == f_stem:                 # same .scns already open
+                    return fr, f"{base} is already open - activating it."
+            elif ext == ".mrc":
+                if has_scns and f_stem in (scns_stem, path_stem):    # this .mrc is already open via a .scns
+                    return fr, f"{base} already opened as {os.path.basename(scns)}, skipping loading."
+                if not has_scns and path_stem == f_stem:             # same .mrc already open
+                    return fr, f"{base} is already open - activating it."
+        return None, None
+
     def import_dataset(self, filename):
         # TODO: upon import, if scNodes, if has overlay and overlay.clem_frame.path found in any CLEMFrame's path, link CLEMFrame and SEFrame s.t. overlay can be updated.
         SegmentationEditor.SHOW_BOOT_SPRITE = False
@@ -569,6 +592,11 @@ class SegmentationEditor:
             return
         for f in filename:
             try:
+                existing, msg = SegmentationEditor._find_open_dataset(f)
+                if existing is not None:
+                    print(msg)
+                    SegmentationEditor.set_active_dataset(existing)
+                    continue
                 _, ext = os.path.splitext(f)
                 if ext == ".mrc":
                     # ============ DEV-FLAVOUR-SWITCHER (TEMPORARY — DELETE ME) ============
@@ -843,7 +871,6 @@ class SegmentationEditor:
                         SegmentationEditor.set_active_dataset(s)
                         for model in cfg.se_models:
                             model.reset_textures()
-                        SegmentationEditor.trainset_apix = s.pixel_size * 10.0
 
                     for f in s.features:
                         imgui.same_line(spacing=1)
@@ -1239,15 +1266,16 @@ class SegmentationEditor:
 
 
                 imgui.text("Set parameters")
-                imgui.begin_child("params", 0.0, 84, True)
+                imgui.begin_child("params", 0.0, 98, True)
                 cw = imgui.get_content_region_available_width()
 
                 imgui.push_item_width(cw)
                 _, self.trainset_boxsize = imgui.slider_int("##box size", self.trainset_boxsize, 8, 256, format=f"box size: {int(self.trainset_boxsize)} pixel")
                 self.trainset_boxsize = np.round(self.trainset_boxsize / 32) * 32
-                _, self.trainset_boxdepth = imgui.slider_int("##box depth", self.trainset_boxdepth, 1, 33, format=f"box depth: {int(self.trainset_boxdepth)} slice"+("s" if self.trainset_boxdepth>1 else ""))
-                self.trainset_boxdepth += 1 if self.trainset_boxdepth % 2 == 0 else 0
-                #_, SegmentationEditor.trainset_apix = imgui.slider_float("A/pix", SegmentationEditor.trainset_apix, 1.0, 20.0, format=f"{SegmentationEditor.trainset_apix:.2f}")
+                _, self.trainset_boxdepth = imgui.slider_int("##box depth", self.trainset_boxdepth, 1, 32, format=f"box depth: {int(self.trainset_boxdepth)} slice"+("s" if self.trainset_boxdepth>1 else ""))
+                # box depth must be 1 (2D/2.5D) or a multiple of 8 (3D slab depths)
+                self.trainset_boxdepth = 1 if self.trainset_boxdepth <= 4 else int(round(self.trainset_boxdepth / 8.0)) * 8
+                _, SegmentationEditor.trainset_apix = imgui.slider_float("##apix", SegmentationEditor.trainset_apix, 1.0, 20.0, format=f"pixel size: {SegmentationEditor.trainset_apix:.1f} A/px")
                 imgui.pop_item_width()
                 calculate_number_of_boxes()
                 imgui.text(f"Positive samples: {self.trainset_num_boxes_positive}")
@@ -1275,7 +1303,8 @@ class SegmentationEditor:
                     if m.active_tab == 0:
                         panel_height = SegmentationEditor.MODEL_PANEL_HEIGHT_TRAINING
                     elif m.active_tab == 1:
-                        panel_height = SegmentationEditor.MODEL_PANEL_HEIGHT_PREDICTION - 16 if cfg.settings["TILED_MODE"] == 0 else SegmentationEditor.MODEL_PANEL_HEIGHT_PREDICTION
+                        _overlap_shown = cfg.settings["TILED_MODE"] == 1 or m.is_3d()   # overlap slider shows when tiling
+                        panel_height = SegmentationEditor.MODEL_PANEL_HEIGHT_PREDICTION if _overlap_shown else SegmentationEditor.MODEL_PANEL_HEIGHT_PREDICTION - 16
                     elif m.active_tab == 2:
                         panel_height = SegmentationEditor.MODEL_PANEL_HEIGHT_LOGIC + 57 * len(m.interactions) - 20 * (len(cfg.se_models) < 2)
                     panel_height += 10 if m.background_process_train is not None else 0
@@ -1448,10 +1477,12 @@ class SegmentationEditor:
 
                             imgui.push_item_width(imgui.get_content_region_available_width())
                             _, m.alpha = imgui.slider_float("##alpha", m.alpha, 0.0, 1.0, format=f"{m.alpha:.2f} alpha")
-                            if cfg.settings["TILED_MODE"] == 1:
+                            if cfg.settings["TILED_MODE"] == 1 or m.is_3d():   # overlap only matters when tiling
                                 _, m.overlap = imgui.slider_float("##overlap", m.overlap, 0.0, 0.67, format=f"{m.overlap:.2f} overlap")
                                 m.overlap = max(0.0, m.overlap)
                             _, m.threshold = imgui.slider_float("##thershold", m.threshold, 0.0, 1.0, format=f"{m.threshold:.2f} threshold")
+                            _, _tta = imgui.slider_float("##tta", float(m.tta), 1.0, 8.0, format=f"{m.tta} TTA")   # float slider -> thin grab like the others
+                            m.tta = int(round(_tta))
                             imgui.pop_item_width()
 
                             _, m.active = imgui.checkbox("active   ", m.active)
@@ -2168,9 +2199,11 @@ class SegmentationEditor:
                                 imgui.end_menu()
                             imgui.end_menu()
 
-                        if imgui.begin_menu("Processing strategy"):
+                        if imgui.begin_menu("Processing strategy (2D & 2.5D nets)"):
                             if imgui.menu_item("full image", None, cfg.settings["TILED_MODE"] == 0)[0]:
                                 cfg.edit_setting("TILED_MODE", 0)
+                            self.tooltip("Full-image vs tiled applies to 2D and 2.5D nets only.\n"
+                                         "3D (slab) nets always tile, since a full slice is too large in 3D.")
                             if imgui.menu_item("tiled (legacy)", None, cfg.settings["TILED_MODE"] == 1)[0]:
                                 cfg.edit_setting("TILED_MODE", 1)
                             if cfg.settings["TILED_MODE"] == 1:
@@ -2204,11 +2237,6 @@ class SegmentationEditor:
                                          "Match this to how the model's training data was normalized.")
                             imgui.end_menu()
 
-                        if imgui.begin_menu("TTA multiplicity"):
-                            for i in range(1, 9):
-                                if imgui.menu_item(f'{i}', None, cfg.settings["TEST_TIME_AUGMENTATIONS"] == i)[0]:
-                                    cfg.edit_setting("TEST_TIME_AUGMENTATIONS", i)
-                            imgui.end_menu()
 
                         if imgui.menu_item("Trim edges", None, cfg.settings["TRIM_EDGES"] == 1)[0]:
                             cfg.edit_setting("TRIM_EDGES", 0 if cfg.settings["TRIM_EDGES"] == 1 else 1)
@@ -3478,7 +3506,7 @@ class SegmentationEditor:
         if len(positive_feature_names) == 0:
             return
 
-        path = filedialog.asksaveasfilename(filetypes=[("Ais training data", cfg.filetype_traindata)], initialfile=f"{int(self.trainset_boxsize)}x{int(self.trainset_boxsize)}x{int(self.trainset_boxdepth)}_{positive_feature_names[0]}")
+        path = filedialog.asksaveasfilename(filetypes=[("Ais training data", cfg.filetype_traindata)], initialfile=f"{int(self.trainset_boxsize)}x{int(self.trainset_boxsize)}x{int(self.trainset_boxdepth)}_{SegmentationEditor.trainset_apix:.2f}Apx_{positive_feature_names[0]}")
         if not isinstance(path, str) or path == '':
             return
         if path[-len(cfg.filetype_traindata):] != cfg.filetype_traindata:
@@ -3499,46 +3527,94 @@ class SegmentationEditor:
         self.active_trainset_exports.append(process)
 
     def _create_training_set(self, path, n_boxes, positives, negatives, datasets, boxsize, boxdepth, apix, process):
-        # This routes through the same extraction/writing code as the `ais extract` CLI
-        # (Ais.core.se_scnt), so the GUI and CLI produce identical new-format .scnt files.
+        # Routes through the SAME worker + packer as `ais extract` (se_scnt.extract_box_task /
+        # pack_staging_dir), so the GUI and CLI produce identical .scnt files: per-dataset apix
+        # resampling (XY), global-MAD normalization (+ the 'global_mad' tag the loader keys on), and
+        # z-jitter Z-context for slab depths. The GUI's dataset/feature/negative selection is honoured.
+        import tempfile, shutil
         try:
-            counter = {'n': 0}
+            apix = float(apix) if apix and apix > 0 else 10.0
+            box_size = int(boxsize)
+            z_jitter = 8 if int(boxdepth) > 1 else 0        # extra Z context for slab-depth training
+            stored_depth = int(boxdepth) + z_jitter
+            GROUP = "__gui_export__"
 
-            def on_box():
-                counter['n'] += 1
-                if n_boxes:
-                    process.set_progress(min(0.99, counter['n'] / n_boxes))
-
-            samples = []
+            # ---- build one worker task per box (mirrors the CLI scout, from in-memory frames) ----
+            tasks = []
             for d in datasets:
                 if not os.path.exists(d.path):
-                    continue
+                    continue   # e.g. a self-contained .scns whose virtual .mrc path isn't on disk
                 tomo_stem = os.path.splitext(os.path.basename(d.path))[0]
-                mrcf = mrcfile.mmap(d.path, mode="r", permissive=True)
-                flavour_data = {se_scnt.DEFAULT_ANNOTATED_FLAVOUR: mrcf.data}
-                try:
-                    for f in d.features:
-                        if f.title in positives:
-                            is_negative = False
-                        elif f.title in negatives:
-                            is_negative = True
+                native_apix = d.pixel_size * 10.0
+                if native_apix and abs(native_apix / apix - 1.0) >= 0.05:
+                    native_bs = int(round(box_size * apix / native_apix))   # extract then resample XY->box_size
+                else:
+                    native_bs = box_size
+                for f in d.features:
+                    if f.title in positives:
+                        is_negative = False
+                    elif f.title in negatives:
+                        is_negative = True
+                    else:
+                        continue
+                    ann_bs = int(getattr(f, 'box_size', native_bs))
+                    margin_per_side = max(0, (native_bs - ann_bs) // 2)
+                    box_coordinates = [(z, b[0], b[1]) for z in f.boxes if f.boxes[z] for b in f.boxes[z]]
+                    for z, x, y in box_coordinates:
+                        if not is_negative and z in f.slices and f.slices[z] is not None:
+                            label_patch = se_scnt.extract_label(f, z, y, x, native_bs)
                         else:
-                            continue
-                        samples.extend(se_scnt.extract_feature_samples(
-                            tomo_stem, flavour_data, se_scnt.DEFAULT_ANNOTATED_FLAVOUR, f,
-                            boxsize, boxdepth, binning=1, is_negative=is_negative,
-                            tomo_path=d.path, on_box=on_box))
-                finally:
-                    try:
-                        mrcf.close()
-                    except Exception:
-                        pass
+                            label_patch = None
+                        tasks.append({
+                            'group': GROUP,
+                            'hash': se_scnt.make_id(tomo_stem, f.title, z, y, x),
+                            'flavour_paths': {se_scnt.DEFAULT_ANNOTATED_FLAVOUR: d.path},
+                            'annotated_flavour': se_scnt.DEFAULT_ANNOTATED_FLAVOUR,
+                            'z': int(z), 'y': int(y), 'x': int(x),
+                            'box_size': int(native_bs), 'out_box_size': int(box_size),
+                            'box_depth': int(stored_depth),
+                            'label_patch': label_patch,
+                            'is_negative': is_negative,
+                            'margin_per_side': margin_per_side,
+                            'source': {
+                                'aisTomogramName': tomo_stem,
+                                'aisTomogramPath': os.path.abspath(d.path),
+                                'aisBoxCoordinateZ': int(z),
+                                'aisBoxCoordinateY': int(y),
+                                'aisBoxCoordinateX': int(x),
+                                'aisBoxSizeAnnotate': int(ann_bs),
+                                'aisBoxSizeExtracted': int(box_size),
+                                'aisFeatureName': f.title,
+                                'aisNegative': bool(is_negative),
+                            },
+                        })
 
-            if not samples:
+            if not tasks:
                 process.set_progress(1.0)
                 return
 
-            se_scnt.write_training_set(path, samples, apix=apix, features=list(positives))
+            # ---- extract every box through the CLI worker, then pack into the .scnt ----
+            staging_root = tempfile.mkdtemp(prefix='scnt_extract_')
+            try:
+                se_scnt.init_extract_worker({'staging_root': staging_root, 'apix': apix})
+                sources = {}
+                n = len(tasks)
+                for i, t in enumerate(tasks):
+                    if process.stop_request.is_set():
+                        return
+                    r = se_scnt.extract_box_task(t)
+                    if r is not None:
+                        _grp, h, source = r
+                        sources[h] = source
+                    process.set_progress(min(0.99, (i + 1) / n))
+                if not sources:
+                    process.set_progress(1.0)
+                    return
+                se_scnt.pack_staging_dir(os.path.join(staging_root, GROUP), path,
+                                         apix=apix, features=list(positives),
+                                         sources=sources, z_jitter=z_jitter)
+            finally:
+                shutil.rmtree(staging_root, ignore_errors=True)
             process.set_progress(1.0)
         except Exception as e:
             cfg.set_error(e, "Could not create training set - see details below:")
@@ -4859,7 +4935,7 @@ class QueuedExport:
                 m_norm = global_stats(mrcd) if cfg.settings["NORMALIZATION"] == "global" else None
                 for j in range(self.dataset.export_bottom, self.dataset.export_top):
                     self.check_stop_request()
-                    j_indices = np.clip(np.arange(j - m.model_depth // 2, j + m.model_depth // 2 + 1), 0, n_slices - 1)
+                    j_indices = np.clip(np.arange(j - m.model_depth // 2, j - m.model_depth // 2 + m.model_depth), 0, n_slices - 1)
                     segmented_slice = m.apply_to_slice(mrcd[j_indices, rx[0]:rx[1], ry[0]:ry[1]], self.dataset.pixel_size, norm_stats=m_norm) * 255
                     segmentations[m_idx, j, rx[0]:rx[1], ry[0]:ry[1]] = segmented_slice
                     n_slices_complete += 1
