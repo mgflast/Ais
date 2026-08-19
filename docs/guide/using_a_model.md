@@ -15,7 +15,10 @@ Ais also contains a built-in 3D isosurface renderer, which is very similar to th
 
 For large scale automated visualisation, use [Pom](https://github.com/mgflast/Pom). Pom uses the Ais rendering engine, and can do isosurface and volumetric rendering. You can run it on a HPC cluster and rapidly generate all sorts of visualisations for hundreds of tomograms.
 
-<!-- Video 2 from the Pom README goes here. -->
+<video controls muted loop autoplay playsinline width="100%">
+  <source src="../../res/pom_rendering.mp4" type="video/mp4">
+</video>
+<p style="text-align: center; font-style: italic; color: var(--md-default-fg-color--light); margin-top: 0.5em;">The tomogram gallery in Pom, switching from thumbnails of the tomograms to 3D renders of their segmentations — generated for the entire dataset in one go.</p>
 
 ## Picking particles
 

@@ -27,7 +27,12 @@ nav:
           - "⚫️ Custom model architectures": features/custom_architectures.md
           - "🔴 The model library": features/model_library.md
           - "🥳 Party mode": features/party_mode.md
-       - "Command reference": cli/reference.md
+       - "<b>Command reference</b>":
+          - "Overview": cli/reference.md
+          - "ais extract": "/Ais/cli/reference/#ais-extract"
+          - "ais train": "/Ais/cli/reference/#ais-train"
+          - "ais segment": "/Ais/cli/reference/#ais-segment"
+          - "ais pick": "/Ais/cli/reference/#ais-pick"
    - "🗄️ Model repository": https://www.aiscryoet.org
    - "🐞 Submit a bug": https://github.com/mgflast/Ais/issues
    - "🐸 easymode": https://mgflast.github.io/easymode/

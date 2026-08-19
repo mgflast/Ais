@@ -6,7 +6,6 @@ Tracing a feature by hand is slow. The active-contouring brush — the **flood**
   <source src="../../res/active_contouring.mp4" type="video/mp4">
 </video>
 <p style="text-align: center; font-style: italic; color: var(--md-default-fg-color--light); margin-top: 0.5em;">The active-contouring brush filling a feature in one stroke, snapping to its edges.</p>
-<!-- record a fresh clip: flood toggled on, one-stroke fill on a membrane, then a sensitivity adjustment -->
 
 ## How to use it
 

@@ -19,8 +19,6 @@ ais
 ais-cryoet
 ```
 
-Alternatively, clone the project from [github.com/mgflast/Ais](https://www.github.com/mgflast/Ais) into an IDE of your choice.
-
 ## CUDA & TensorFlow
 
 To enable processing on the GPU, TensorFlow must be set up to use CUDA. This can be a bit of a pain, as only particular combinations of versions of TensorFlow, CUDA, cuDNN, and protobuf (a Python package) tend to work. When installing Ais via pip, the versioning should be handled, but CUDA must still be manually installed. For instructions, see:
