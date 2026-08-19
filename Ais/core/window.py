@@ -33,6 +33,7 @@ class Window:
         self.cursor_pos = [0, 0]
         self.cursor_pos_previous_frame = [0, 0]
         self.cursor_delta = [0, 0]
+        self.cursor_hold = None       # if set to [x, y], on_update pins cursor_pos here (in-place drag gestures)
         self.scroll_delta = [0, 0]
         self.mouse_event = MouseButtonEvent(None, None, None)
         self.key_event = KeyEvent(None, None, None)
@@ -86,7 +87,7 @@ class Window:
         glClearColor(*self.clear_color)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self.cursor_pos_previous_frame = self.cursor_pos
-        self.cursor_pos = list(glfw.get_cursor_pos(self.glfw_window))
+        self.cursor_pos = list(self.cursor_hold) if self.cursor_hold is not None else list(glfw.get_cursor_pos(self.glfw_window))
         self.cursor_delta = [-self.cursor_pos_previous_frame[0] + self.cursor_pos[0], -self.cursor_pos_previous_frame[1] + self.cursor_pos[1]]
         if self.reset_event_timer:
             self.mouse_press_duration = 0

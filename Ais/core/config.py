@@ -13,7 +13,7 @@ glfw_initialized = False
 
 root = os.path.dirname(os.path.dirname(__file__))
 app_name = "Ais"
-version = "1.2.10"
+version = "1.2.26"
 license = "GNU GPL v3"
 log_path = os.path.join(os.path.expanduser("~"), ".Ais", "Ais.log")
 settings_path = os.path.join(os.path.expanduser("~"), ".Ais", "settings.txt")
@@ -58,16 +58,23 @@ controls_info_text = \
     "scroll:            change slice\n" \
     "    +shift:        zoom\n" \
     "    + ctrl:        change brush size\n" \
+    "middle mouse:      pan\n" \
+    "    + ctrl:        change brush size (drag L/R)\n" \
     "spacebar:          reset view\n" \
     "key A:             toggle autocontrast\n" \
     "key I:             toggle inversion\n" \
     "    +shift:        toggle interpolation\n" \
     "key C:             toggle cropping\n" \
     "key F:             toggle flood drawing mode\n" \
+    "    +shift:        toggle contour mode\n" \
+    "key -/=:           flood sensitivity (flood mode)\n" \
+    "key X:             hide/show active feature\n" \
     "key Q:             hide 3d models\n" \
     "key O:             toggle overlay visibility\n" \
+    "key Z:             toggle all filters\n" \
     "key W:             select previous feature\n" \
     "key S:             select next feature\n" \
+    "    +ctrl:         save dataset\n" \
     "key left:          previous slice\n" \
     "key right:         next slice\n" \
     "key up:            previous dataset\n" \
@@ -341,8 +348,8 @@ def apply_feature_library():
                 f.colour = library_feature.colour
 
     for f in se_surface_models:
-        if s.title in flib_dict:
-            library_feature = flib_dict[s.title]
+        if f.title in flib_dict:
+            library_feature = flib_dict[f.title]
             f.colour = library_feature.colour
             f.alpha = library_feature.render_alpha
             f.dust = library_feature.dust

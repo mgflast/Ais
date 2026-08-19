@@ -259,7 +259,15 @@ class SEModel:
     idgen = count(0)
     AVAILABLE_MODELS = []
     MODELS = dict()
+    MODEL_MODULES = dict()   # title -> arch module, so compile() can reach arch-level globals
     MODELS_LOADED = False
+    # older .scnm files store the architecture as an index into AVAILABLE_MODELS; this is that
+    # list as it was ordered then, so those indices keep resolving after library changes. New
+    # files store the title (metadata 'arch') instead.
+    LEGACY_MODEL_ENUM = ['ezm-2d-dice', 'ezm-2d-bxe', 'ezm-3d', 'ezm-3d-bxe', 'ezm-3d-filament',
+                         'Eman2', 'InceptionNet', 'Pix2pix', 'cryoPom-bxe', 'cryoPom-comb',
+                         'cryoPom-dice', 'ResNet', 'UNet L', 'UNet S', 'VGGNet L', 'VGGNet M',
+                         'VGGNet S', 'VGGNet X']
     DEFAULT_COLOURS = [(66 / 255, 214 / 255, 164 / 255),
                        (255 / 255, 243 / 255, 0 / 255),
                        (255 / 255, 104 / 255, 0 / 255),
@@ -270,6 +278,8 @@ class SEModel:
                        (0 / 255, 247 / 255, 255 / 255),
                        (0 / 255, 255 / 255, 0 / 255)]
     DEFAULT_MODEL_ENUM = 1
+    INFERENCE_TILE_3D = 384         # GUI 3D XY tile size, decoupled from training box_size (net is fully-conv)
+    INFERENCE_OVERLAP_PX_3D = 32    # fixed overlap (px) between 3D tiles; stride = tile - overlap
 
     def __init__(self, no_glfw=False):
         if not SEModel.MODELS_LOADED:
@@ -309,6 +319,7 @@ class SEModel:
         self.normalization = None  # None = legacy per-box/per-slice; else global
         self.z_jitter = 0          # slab models: trained Z-position jitter (= reliable output half-range*2)
         self.tta = 1               # per-model test-time augmentation multiplicity (1-8)
+        self.filament_diameter = None   # if set (px), `ais train --filament D` sizes the arch's fixed tube-render kernel
         self.data = None
         if not no_glfw:
             self.texture = Texture(format="r32f")
@@ -348,7 +359,9 @@ class SEModel:
                 'compiled': self.compiled,
                 'box_size': self.box_size,
                 'model_depth': self.model_depth,
+                'filament_diameter': self.filament_diameter,   # tube-render diameter (px); sizes the fixed render kernel on rebuild
                 'model_enum': self.model_enum,
+                'arch': SEModel.AVAILABLE_MODELS[self.model_enum] if 0 <= self.model_enum < len(SEModel.AVAILABLE_MODELS) else None,
                 'epochs': self.epochs,
                 'batch_size': self.batch_size,
                 'active': self.active,
@@ -408,12 +421,18 @@ class SEModel:
                 model_file = glob.glob(os.path.join(temp_dir, "*_weights.h5"))[0]
                 metadata_file = glob.glob(os.path.join(temp_dir, "*_metadata.json"))[0]
 
-                # Load the Keras model
-                self.model = load_model(model_file, compile=compile)
-                self.toggle_inference()
-                # Load metadata
+                # Load metadata first: the arch module may own its serialization
                 with open(metadata_file, 'r') as f:
                     metadata = json.load(f)
+
+                # an arch .py that defines load_model(path) (e.g. a PyTorch wrapper) loads its own
+                # weights file; everything else is a Keras model.
+                loader = getattr(SEModel.MODEL_MODULES.get(metadata.get('arch')), 'load_model', None)
+                if loader is not None:
+                    self.model = loader(model_file)
+                else:
+                    self.model = load_model(model_file, compile=compile)
+                self.toggle_inference()
 
                 self.title = metadata['title']
                 self.colour = metadata['colour']
@@ -421,7 +440,16 @@ class SEModel:
                 self.compiled = metadata['compiled']
                 self.box_size = metadata['box_size']
                 self.model_depth = metadata.get('model_depth', 1)
-                self.model_enum = metadata['model_enum']
+                self.filament_diameter = metadata.get('filament_diameter', None)
+                arch = metadata.get('arch')
+                if arch is None and 0 <= metadata['model_enum'] < len(SEModel.LEGACY_MODEL_ENUM):
+                    arch = SEModel.LEGACY_MODEL_ENUM[metadata['model_enum']]
+                if arch in SEModel.AVAILABLE_MODELS:
+                    self.model_enum = SEModel.AVAILABLE_MODELS.index(arch)
+                else:
+                    if arch is not None:
+                        print(f"architecture '{arch}' is not in the model library; the model still works, but is listed under the default architecture.")
+                    self.model_enum = SEModel.DEFAULT_MODEL_ENUM
                 self.epochs = metadata['epochs']
                 self.batch_size = metadata['batch_size']
                 self.active = metadata['active']
@@ -530,6 +558,18 @@ class SEModel:
 
     def compile(self, box_size, box_depth=1):
         model_module_name = SEModel.AVAILABLE_MODELS[self.model_enum]
+        # Filament tube-render archs (ezm-3d-filament) build a fixed 'tube_render' dilation layer whose
+        # ball radius = D/2 bakes in the known filament diameter. That radius sets the layer's kernel SIZE,
+        # so it must be chosen before create() runs (set_weights can't reshape a kernel). Publish the
+        # --filament diameter (persisted in metadata) to the SELECTED arch's module; it defaults to the
+        # arch's own DEFAULT_DIAMETER_PX when unset, and is reset by create() so it can't leak.
+        if self.filament_diameter:
+            _tmod = SEModel.MODEL_MODULES.get(model_module_name)
+            if _tmod is not None and hasattr(_tmod, '_ACTIVE_DIAMETER_PX'):
+                _tmod._ACTIVE_DIAMETER_PX = float(self.filament_diameter)
+            else:
+                print(f"Warning: --filament {self.filament_diameter:g} ignored - '{model_module_name}' has no "
+                      f"tube-render kernel. Use a filament architecture (e.g. ezm-3d-filament).")
         self.model = SEModel.MODELS[model_module_name]((box_size, box_size, box_depth))
         # Re-compile with the arch's own loss/optimizer plus streaming precision/recall,
         # so they are printed per epoch during training (like easymode). Masked metrics
@@ -543,6 +583,9 @@ class SEModel:
         self.update_info()
 
     def toggle_inference(self):
+        if not isinstance(self.model, Model):
+            self.compilation_mode = 'inference'   # non-Keras models handle variable input sizes themselves
+            return
         config = self.model.get_config()
         weights = self.model.get_weights()
 
@@ -562,6 +605,9 @@ class SEModel:
         self.compilation_mode = 'inference'
 
     def toggle_training(self):
+        if not isinstance(self.model, Model):
+            self.compilation_mode = 'training'   # non-Keras models train and infer on the same object
+            return
         weights = self.model.get_weights()
 
         del self.model
@@ -608,17 +654,36 @@ class SEModel:
 
     def slice_to_boxes(self, image, pixel_size, as_array=True):
         w, h, d = image.shape
-        self.overlap = min([0.9, self.overlap])
-        pad_w = self.box_size - (w % self.box_size)
-        pad_h = self.box_size - (h % self.box_size)
-        # tile
-        stride = int(self.box_size * (1.0 - self.overlap))
-        boxes = list()
-        image = np.pad(image, ((0, pad_w), (0, pad_h), (0, 0)), mode='reflect')
+        # 3D is fully-convolutional, so tile at a larger fixed XY size than the training box_size, with a
+        # fixed px overlap (efficiency: fewer, larger forward passes; tiny overlap waste). 2D keeps the
+        # trained box_size and its fractional-overlap slider.
+        if self.is_3d():
+            tile = SEModel.INFERENCE_TILE_3D   # small images are just reflect-padded up to this by _pad
+            stride = max(1, tile - SEModel.INFERENCE_OVERLAP_PX_3D)
+        else:
+            self.overlap = min([0.9, self.overlap])
+            tile = self.box_size
+            stride = max(1, int(tile * (1.0 - self.overlap)))
+        margin = int((tile - stride) / 2)   # centre-only mask half-width (see boxes_to_slice)
+        # reflect-pad EVERY side (like CLI inference's _pad_volume), so boundary tiles have real context
+        # beyond the image edge instead of hitting the raw tensor boundary (which gives bad edge output).
+        # >= margin so the real image is covered by tile CENTRES, not by trimmed borders.
+        context = max(64, margin)
+
+        def _pad(n):
+            padded = max(tile, n + 2 * context)
+            padded += (stride - (padded - tile) % stride) % stride   # align so tiles cover exactly
+            return context, padded - n - context     # (before, after)
+
+        (plw, phw), (plh, phh) = _pad(w), _pad(h)
+        image = np.pad(image, ((plw, phw), (plh, phh), (0, 0)), mode='reflect')
+        pw, ph = image.shape[0], image.shape[1]
+
         global_norm = cfg.settings["NORMALIZATION"] == "global"
-        for x in range(0, w + pad_w - self.box_size + 1, stride):
-            for y in range(0, h + pad_h - self.box_size + 1, stride):
-                box = image[x:x + self.box_size, y:y + self.box_size, :]
+        boxes = list()
+        for x in range(0, pw - tile + 1, stride):
+            for y in range(0, ph - tile + 1, stride):
+                box = image[x:x + tile, y:y + tile, :]
                 if not global_norm:   # legacy: per-box
                     mu = np.mean(box, axis=(0, 1, 2), keepdims=True)
                     std = np.std(box, axis=(0, 1, 2), keepdims=True) + 1e-7
@@ -626,39 +691,33 @@ class SEModel:
                 boxes.append(box)
         if as_array:
             boxes = np.array(boxes)
-        return boxes, (w, h), (pad_w, pad_h), stride
+        return boxes, (w, h), ((plw, phw), (plh, phh)), stride
 
     def boxes_to_slice(self, boxes, size, original_pixel_size, padding, stride):
-        pad_w, pad_h = padding
+        (plw, phw), (plh, phh) = padding
         w, h = size
-        out_image = np.zeros((w + pad_w, h + pad_h))
-        count = np.zeros((w + pad_w, h + pad_h), dtype=int)
-        # 240809: apply a mask to all the segmented boxes so that only center (best) bit us used
+        pw, ph = w + plw + phw, h + plh + phh
+        out_image = np.zeros((pw, ph))
+        count = np.zeros((pw, ph), dtype=int)
+        # 240809: mask each box so only its (best-contextualised) centre contributes; the trimmed
+        # border falls where a neighbouring tile's centre - or the reflect padding - covers it.
         box_size = boxes[0].shape[0]
+        margin = int((box_size - stride) / 2)
         mask = np.ones((box_size, box_size), dtype=int)
-        overlap = 1 - (stride / box_size)
-        margin = int(overlap * box_size / 2)
-        if margin > 0:
-            mask[-margin:, :] = 0.0
-            mask[:margin, :] = 0.0
-            mask[:, -margin:] = 0.0
-            mask[:, :margin] = 0.0
-
-        if cfg.settings["OVERLAP_MODE"] == 0:
-            mask[:, :] = 1
+        if margin > 0 and cfg.settings["OVERLAP_MODE"] != 0:
+            mask[-margin:, :] = 0
+            mask[:margin, :] = 0
+            mask[:, -margin:] = 0
+            mask[:, :margin] = 0
         i = 0
-        for x in range(0, w + pad_w - self.box_size + 1, stride):
-            for y in range(0, h + pad_h - self.box_size + 1, stride):
-                out_image[x:x + self.box_size, y:y + self.box_size] += boxes[i] * mask
-                count[x:x + self.box_size, y:y + self.box_size] += mask
+        for x in range(0, pw - box_size + 1, stride):
+            for y in range(0, ph - box_size + 1, stride):
+                out_image[x:x + box_size, y:y + box_size] += boxes[i] * mask
+                count[x:x + box_size, y:y + box_size] += mask
                 i += 1
-        c_mask = count == 0
-        count[c_mask] = 1
-        out_image[c_mask] = 0
+        count[count == 0] = 1
         out_image = out_image / count
-        out_image = out_image[:w, :h]
-        out_image = out_image[:w, :h]
-        return out_image
+        return out_image[plw:plw + w, plh:plh + h]   # crop the reflect padding back off
 
     def is_3d(self):
         # a slab model has a rank-5 input (Y, X, Z, C); these always tile at inference
@@ -801,6 +860,74 @@ class SEModel:
 
         return segmentation
 
+    # ---- slab-returning inference: used by QueuedExport's strided-Z 3D export (like CLI _infer_slab)
+    def _run_slab(self, x):
+        """Like _run but keeps the FULL Z-slab output: x=(B, Y, X, D) -> (B, Y, X, D). 3D models only;
+        batch is fixed to 1 in the loaded graph, so run one box at a time."""
+        outs = []
+        for b in range(x.shape[0]):
+            o = self.model.predict(x[b][np.newaxis, ..., np.newaxis], verbose=0)   # (1, Y, X, D, 1)
+            outs.append(o[0, ..., 0])                                              # (Y, X, D)
+        return np.stack(outs, axis=0)                                              # (B, Y, X, D)
+
+    def boxes_to_slab(self, boxes, size, padding, stride):
+        """Stitch (n, tile, tile, D) slab tiles into (Y, X, D): same XY centre-mask + reflect-crop as
+        boxes_to_slice, but keeping the whole Z-slab."""
+        (plw, phw), (plh, phh) = padding
+        w, h = size
+        pw, ph = w + plw + phw, h + plh + phh
+        tile, depth = boxes[0].shape[0], boxes[0].shape[2]
+        out = np.zeros((pw, ph, depth), dtype=np.float32)
+        count = np.zeros((pw, ph), dtype=np.float32)
+        margin = int((tile - stride) / 2)
+        mask = np.ones((tile, tile), dtype=np.float32)
+        if margin > 0 and cfg.settings["OVERLAP_MODE"] != 0:
+            mask[-margin:, :] = 0; mask[:margin, :] = 0; mask[:, -margin:] = 0; mask[:, :margin] = 0
+        i = 0
+        for x in range(0, pw - tile + 1, stride):
+            for y in range(0, ph - tile + 1, stride):
+                out[x:x + tile, y:y + tile, :] += boxes[i] * mask[:, :, None]
+                count[x:x + tile, y:y + tile] += mask
+                i += 1
+        count[count == 0] = 1
+        out = out / count[:, :, None]
+        return out[plw:plw + w, plh:plh + h, :]                                     # (Y, X, D)
+
+    def apply_to_slab(self, image, pixel_size, norm_stats=None):
+        """3D slab inference returning the FULL (depth, Y, X) slab (not just the centre slice), for
+        strided-Z export. XY-tiled + TTA, mirroring apply_to_slice's tiled branch. image is (depth, Y, X)."""
+        if self.compilation_mode == 'training' and self.background_process_train is None:
+            self.toggle_inference()
+        orig_y, orig_x = image.shape[1], image.shape[2]
+        tomo_rescaled = False
+        if cfg.settings["INFERENCE_ALLOW_RESCALING"] and pixel_size != -1 and self.apix != -1:
+            factor = 10.0 * pixel_size / self.apix
+            if abs(factor - 1.0) > 0.05:
+                image = resize(image, np.round([image.shape[0], orig_y * factor, orig_x * factor]).astype(int), order=1, anti_aliasing=True)
+                tomo_rescaled = True
+        image = np.transpose(image, (1, 2, 0))                                      # (Y, X, D)
+        if cfg.settings["NORMALIZATION"] == "global":
+            center, scale = norm_stats if norm_stats is not None else global_stats(np.transpose(image, (2, 0, 1)))
+            image = (image - center) / scale
+        _rot = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
+        _flip = [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1]
+        _flip_z = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]
+        slab = None
+        for i in range(self.tta):
+            tta_img = np.rot90(image, k=_rot[i], axes=(0, 1))
+            if _flip[i]: tta_img = np.flip(tta_img, axis=0)
+            if _flip_z[i]: tta_img = np.flip(tta_img, axis=2)
+            boxes, image_size, padding, stride = self.slice_to_boxes(tta_img, pixel_size)
+            s_i = self.boxes_to_slab(self._run_slab(boxes), image_size, padding, stride)   # (Y, X, D)
+            if _flip_z[i]: s_i = np.flip(s_i, axis=2)
+            if _flip[i]: s_i = np.flip(s_i, axis=0)
+            s_i = np.rot90(s_i, k=-_rot[i], axes=(0, 1))
+            slab = s_i if slab is None else slab + s_i
+        slab = slab / self.tta                                                      # (Y, X, D)
+        if tomo_rescaled:
+            slab = resize(slab, [orig_y, orig_x, slab.shape[2]], order=1, anti_aliasing=True)
+        return np.transpose(slab, (2, 0, 1))                                        # (D, Y, X)
+
     @staticmethod
     def load_models():
         model_files = glob.glob(os.path.join(cfg.root, "models", "*.py"))
@@ -819,6 +946,7 @@ class SEModel:
                     spec.loader.exec_module(mod)
                 if mod.include:
                     SEModel.MODELS[mod.title] = mod.create
+                    SEModel.MODEL_MODULES[mod.title] = mod
             except Exception as e:
                 cfg.set_error(e, "Could not load SegmentationEditor model at path: "+file)
         SEModel.MODELS_LOADED = True

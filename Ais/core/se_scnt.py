@@ -79,6 +79,25 @@ def _scale_xy(arr, out_xy, anti_aliasing=True):
                   preserve_range=True, order=1 if anti_aliasing else 0)
 
 
+def _soft_tube_label(label, sigma, ignore_label=2.0):
+    """Turn a binary annotation label (H,W, values {0,1,ignore}) into a soft Gaussian-tube target:
+    skeletonize the foreground to a 1-px centerline, then set each pixel to exp(-d^2 / 2 sigma^2)
+    where d is the distance to the nearest centerline pixel. Background stays 0, ignore is preserved.
+    The tube diameter is the FWHM (sigma = diameter / 2.355), so threshold 0.5 recovers a D-wide tube.
+    This makes the target robust to blunt / over-wide 2D drawing - only the centerline matters."""
+    from skimage.morphology import skeletonize
+    from scipy.ndimage import distance_transform_edt
+    soft = np.zeros(label.shape, dtype=np.float32)
+    fg = (label == 1)
+    if fg.any():
+        skel = skeletonize(fg)
+        if skel.any():
+            d = distance_transform_edt(~skel).astype(np.float32)
+            soft = np.exp(-(d * d) / (2.0 * sigma * sigma)).astype(np.float32)
+    soft[label == ignore_label] = ignore_label
+    return soft
+
+
 def extract_box(data, z, y, x, box_size, box_depth, n_slices):
     """Extract a (box_depth, box_size, box_size) box centred on (z, y, x) from a
     3D volume (Z, Y, X). Out-of-plane indices are clamped; in-plane the box is
@@ -91,8 +110,10 @@ def extract_box(data, z, y, x, box_size, box_depth, n_slices):
 
     depth = len(z_indices)
     half = box_size // 2
-    y0, y1 = y - half, y + half
-    x0, x1 = x - half, x + half
+    # span exactly box_size: y + half is one short for odd box_size (odd sizes occur when a
+    # tomogram's native pixel size makes the pre-resampling extraction size odd)
+    y0, y1 = y - half, y - half + box_size
+    x0, x1 = x - half, x - half + box_size
 
     box = np.zeros((depth, box_size, box_size), dtype=np.float32)
     validity = np.zeros((box_size, box_size), dtype=np.float32)
@@ -117,8 +138,8 @@ def extract_label(feature, z, y, x, box_size):
     h, w = sl.shape
 
     half = box_size // 2
-    y0, y1 = y - half, y + half
-    x0, x1 = x - half, x + half
+    y0, y1 = y - half, y - half + box_size   # same span convention as extract_box
+    x0, x1 = x - half, x - half + box_size
 
     labels = np.zeros((box_size, box_size), dtype=sl.dtype)
 
@@ -511,6 +532,20 @@ class ScntTrainingSet:
     def _read_label(self, h):
         return np.array(mrcfile.read(os.path.join(self._tmp, LABEL_DIR, h + '.mrc')), dtype=np.float32)
 
+    def soften_labels(self, diameter):
+        """Rewrite every stored label (in the extracted temp dir) as a soft Gaussian 'tube' of the
+        given diameter (px, = FWHM) centred on the annotation's skeleton - see _soft_tube_label. Turns
+        binary filament masks into smooth centerline ridges. Called once after load by `ais train
+        --filament D`, so the raw .scnt stays binary and D can be swept per run without re-extracting."""
+        sigma = float(diameter) / 2.3548
+        if sigma <= 0:
+            return
+        for h in self.hashes:
+            p = os.path.join(self._tmp, LABEL_DIR, h + '.mrc')
+            soft = _soft_tube_label(np.array(mrcfile.read(p), dtype=np.float32), sigma)
+            with mrcfile.new(p, overwrite=True) as m:
+                m.set_data(np.ascontiguousarray(soft, dtype=np.float32))
+
     def positive_indices(self):
         out = []
         for i, h in enumerate(self.hashes):
@@ -615,6 +650,10 @@ class PooledTrainingSet:
         if len(norms) > 1:
             print("Warning: pooling training sets with mixed normalization schemes; "
                   "using per-box normalization for the model.")
+
+    def soften_labels(self, diameter):
+        for s in self.sets:
+            s.soften_labels(diameter)
 
     def positive_indices(self):
         out = []

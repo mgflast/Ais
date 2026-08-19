@@ -22,6 +22,7 @@ class SEFrame:
         self.uid = int(datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')+"000") + uid_counter
         self.path = path
         self.scns_path = "n/a"
+        self.unsaved = False
         self._norm_cache = None   # (path, center, scale)
         if os.path.exists(self.path):
             self.title = os.path.splitext(os.path.basename(path))[0]
@@ -274,7 +275,7 @@ class SEFrame:
 
     def __reduce__(self):
         state = self.__dict__.copy()
-        to_remove = ['rendered_data', 'clem_frame']
+        to_remove = ['rendered_data', 'clem_frame', 'unsaved']  # a .scns must never load back dirty
         for key in to_remove:
             if key in state:
                 del state[key]
@@ -462,6 +463,7 @@ class Segmentation:
         self.request_draw_in_current_slice()
         self.boxes[self.current_slice].append(pixel_coordinates)
         self.n_boxes += 1
+        self.parent.unsaved = True
 
     def remove_box(self, pixel_coordinate):
         box_list = self.boxes[self.current_slice]
@@ -477,6 +479,7 @@ class Segmentation:
         if idx is not None:
             self.boxes[self.current_slice].pop(idx)
             self.n_boxes -= 1
+            self.parent.unsaved = True
 
     def set_slice(self, requested_slice):
         if requested_slice == self.current_slice:
@@ -781,7 +784,7 @@ class SurfaceModel:
             x = X[i]
             l = labels[z, y, x]
             if l not in new_blobs:
-                new_blobs[l] = SurfaceModelBlob(data, self.level, self.pixel_size * self.bin, origin, no_gpu=self.no_gpu)
+                new_blobs[l] = SurfaceModelBlob(data, self.level, self.pixel_size * self.bin, origin, no_gpu=self.no_gpu, bin=self.bin)
             new_blobs[l].x.append(x)
             new_blobs[l].y.append(y)
             new_blobs[l].z.append(z)
@@ -879,10 +882,11 @@ class SurfaceModel:
 
 
 class SurfaceModelBlob:
-    def __init__(self, data, level, pixel_size, origin, no_gpu=False):
+    def __init__(self, data, level, pixel_size, origin, no_gpu=False, bin=1):
         self.data = data
         self.level = level
-        self.pixel_size = pixel_size
+        self.pixel_size = pixel_size   # of the (possibly binned) grid the mesh is built on
+        self.bin = max(1, int(bin))
         self.origin = origin
         self.no_gpu = no_gpu
         self.x = list()
@@ -922,11 +926,16 @@ class SurfaceModelBlob:
         mask = binary_dilation(mask, iterations=2)
         box *= mask
         vertices, faces, normals, _ = measure.marching_cubes(box, level=self.level)
-        vertices += np.array([rz[0], ry[0], rx[0]])
+        # box is padded by 1 voxel per side (box[1] holds data[r[0]]), so undo that pad as well as
+        # the crop offset - without the -1 the whole mesh sits one (binned) voxel along each axis.
+        vertices += np.array([rz[0] - 1, ry[0] - 1, rx[0] - 1])
         self.vertices = vertices[:, [2, 1, 0]]
         self.normals = normals[:, [2, 1, 0]]
 
         self.vertices *= self.pixel_size
+        # bin_data averages each bin**3 block, so a binned voxel is the block's CENTRE, but the
+        # scaling above puts it at the block's leading edge; shift by half a block to compensate.
+        self.vertices += 0.5 * (self.bin - 1) * self.pixel_size / self.bin
         self.vertices -= np.array([self.origin[2], self.origin[1], self.origin[0]])
         self.vao_data = np.hstack((self.vertices, self.normals)).flatten()
         self.indices = faces.flatten()

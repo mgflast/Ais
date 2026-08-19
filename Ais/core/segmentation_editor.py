@@ -68,6 +68,8 @@ class SegmentationEditor:
     BLEND_MODES_LIST_3D = list(BLEND_MODES_3D.keys())
 
     pick_tab_index_datasets_segs = False
+    EXIT_PROMPT = False
+    EXIT_PROMPT_OPEN_REQUESTED = False
     VIEW_3D_PIVOT_SPEED = 0.3
     VIEW_3D_MOVE_SPEED = 100.0
     PICKING_FRAME_ALPHA = 1.0
@@ -112,9 +114,10 @@ class SegmentationEditor:
 
     trainset_apix = 10.0
     seg_folder = ""
+    feature_move_request = None  # (feature, to_top) - applied after the panel loop, not during
 
     SHOW_BOOT_SPRITE = True
-    ICON = Image.open(os.path.join(cfg.root, "icons", "LOGO_Pom_128.png"))
+    ICON = Image.open(os.path.join(cfg.root, "icons", "ais_boot_sprite.png")).resize((256, 256))   # the circular Ais logo (matches the taskbar shortcut)
 
     FEATURE_IMPORT_MRC_THRESHOLD = 128
     PATH_VIEWER_MISSING_DICT = dict()
@@ -157,6 +160,9 @@ class SegmentationEditor:
         SegmentationEditor.renderer = Renderer()
         self.filters = list()
         self.active_tab = "Segmentation"
+        self._previous_tab = "Segmentation"   # for sync_cameras_on_tab_change
+        self.brush_resize_lock = None      # ctrl+middle-drag brush resize: locked cursor pos while active, else None
+        self.brush_resize_prev_x = 0.0
 
         # training dataset params
         self.all_feature_names = list()
@@ -257,6 +263,34 @@ class SegmentationEditor:
             SegmentationEditor.renderer.fbo1.texture.set_no_interpolation()
             SegmentationEditor.renderer.fbo2.texture.set_no_interpolation()
 
+    def _update_brush_resize(self, active_feature):
+        # Ctrl + middle-drag left/right resizes the active feature's brush. Use GLFW's locked-cursor
+        # mode: it hides + pins the pointer and reports smooth raw movement, so the brush changes
+        # smoothly and the cursor stays put - no per-frame set_cursor_pos snap-back (that was the
+        # jitter). Runs every frame so the cursor is always restored, even if the tab/feature changes.
+        win = self.window.glfw_window
+        active = (self.active_tab == "Segmentation" and active_feature is not None
+                  and SegmentationEditor.is_ctrl_down()
+                  and self.window.get_mouse_button(glfw.MOUSE_BUTTON_MIDDLE)
+                  and not imgui.get_io().want_capture_mouse)
+        if active:
+            if self.brush_resize_lock is None:                      # begin drag
+                self.brush_resize_lock = list(self.window.cursor_pos)
+                self.window.cursor_hold = list(self.brush_resize_lock)   # window pins cursor_pos here every frame (freezes the brush circle)
+                self.window.cursor_pos = list(self.brush_resize_lock)    # and this frame too (window.on_update already ran)
+                glfw.set_input_mode(win, glfw.CURSOR, glfw.CURSOR_DISABLED)
+                self.brush_resize_prev_x = glfw.get_cursor_pos(win)[0]
+            else:                                                   # continue drag
+                vx = glfw.get_cursor_pos(win)[0]
+                active_feature.brush_size = max(1.0, active_feature.brush_size + 0.1 * (vx - self.brush_resize_prev_x))
+                self.brush_resize_prev_x = vx
+        elif self.brush_resize_lock is not None:                    # end drag -> restore the visible cursor
+            glfw.set_input_mode(win, glfw.CURSOR, glfw.CURSOR_NORMAL)
+            glfw.set_cursor_pos(win, self.brush_resize_lock[0], self.brush_resize_lock[1])
+            self.window.cursor_hold = None
+            self.window.cursor_pos = list(self.brush_resize_lock)
+            self.brush_resize_lock = None
+
     def on_update(self):
         imgui.set_current_context(self.imgui_context)
         imgui.CONFIG_DOCKING_ENABLE = True  # maayyyybe not?
@@ -288,6 +322,12 @@ class SegmentationEditor:
                 except Exception as e:
                     cfg.set_error(e, f"Error during a Pom synchronization call.")
                 SegmentationEditor.POM_SYNCHRONIZE_TIMER = 0
+
+        # glfw latches the close request; clear it so the prompt gets a frame to show in
+        if glfw.window_should_close(self.window.glfw_window) and any(f.unsaved for f in cfg.se_frames):
+            glfw.set_window_should_close(self.window.glfw_window, False)
+            SegmentationEditor.EXIT_PROMPT = True
+            SegmentationEditor.EXIT_PROMPT_OPEN_REQUESTED = True
 
         self.window.on_update()
 
@@ -454,6 +494,7 @@ class SegmentationEditor:
         active_feature = None
         if active_frame is not None:
             active_feature = cfg.se_active_frame.active_feature
+        self._update_brush_resize(active_feature)   # ctrl+middle-drag brush resize (locked cursor)
 
         # Key inputs that affect the active feature:
         if active_frame is not None:
@@ -467,7 +508,7 @@ class SegmentationEditor:
         if self.active_tab == "Segmentation":
             if active_feature is not None:
                 if SegmentationEditor.is_ctrl_down() and active_feature is not None:
-                    active_feature.brush_size += 0.5 * self.window.scroll_delta[1]
+                    active_feature.brush_size += 0.5 * self.window.scroll_delta[1]                    # ctrl + scroll (middle-drag handled in _update_brush_resize)
                     active_feature.brush_size = max([1, active_feature.brush_size])
                 if imgui.is_key_pressed(glfw.KEY_S) and not imgui.is_key_down(glfw.KEY_LEFT_CONTROL):
                     idx = 0 if active_feature not in active_frame.features else active_frame.features.index(active_feature)
@@ -743,6 +784,7 @@ class SegmentationEditor:
                 with open(filename, 'wb') as pickle_file:
                     pickle.dump(cfg.se_active_frame, pickle_file)
                     print(f"Saved {filename}")
+                cfg.se_active_frame.unsaved = False
                 cfg.push_recent_dataset(filename)   # a saved .scns joins the recent datasets (and evicts its .mrc twin)
 
 
@@ -819,7 +861,8 @@ class SegmentationEditor:
                     imgui.push_id(f"se{s.uid}")
 
                     base_title = s.title.split(".")[0]
-                    _change, _selected = imgui.selectable(base_title[-17:] + f" - {s.pixel_size * 10.0:.2f} A/pix ", cfg.se_active_frame == s)
+                    unsaved_mark = "*" if s.unsaved else ""
+                    _change, _selected = imgui.selectable(base_title[-17:] + f" - {s.pixel_size * 10.0:.2f} A/pix{unsaved_mark} ", cfg.se_active_frame == s)
                     if imgui.begin_popup_context_item("##datasetContext"):
                         if imgui.menu_item("Unlink dataset")[0]:
                             SegmentationEditor.pick_tab_index_datasets_segs = True
@@ -866,7 +909,7 @@ class SegmentationEditor:
                                 f.voxel_size = s.pixel_size * 10.0
                             self.import_dataset(os.path.splitext(s.path)[0]+'_flipped.mrc')
                         imgui.end_popup()
-                    self.tooltip(f"{s.title}\nPixel size: {s.pixel_size * 10.0:.4f} Angstrom\nLocation: {s.path}")
+                    self.tooltip(f"{s.title}\nPixel size: {s.pixel_size * 10.0:.4f} Angstrom\nLocation: {s.path}" + ("\nUnsaved annotation changes" if s.unsaved else ""))
                     if _change and _selected:
                         SegmentationEditor.set_active_dataset(s)
                         for model in cfg.se_models:
@@ -1076,7 +1119,7 @@ class SegmentationEditor:
                         imgui.push_item_width(cw - 40)
                         pxs = cfg.se_active_frame.pixel_size
                         _nsc = SegmentationEditor._push_slider_grab(f.colour)
-                        _, f.brush_size = imgui.slider_float("brush", f.brush_size, 1.0, 25.0 / pxs, format=f"{f.brush_size:.1f} px / {f.brush_size * pxs:.1f} nm ")
+                        _, f.brush_size = imgui.slider_float("brush", f.brush_size, 1.0, 25.0 / pxs, format=f"{f.brush_size * 2:.1f} px / {f.brush_size * 2 * pxs:.1f} nm ")   # brush_size is the paint radius; show the diameter (actual footprint)
                         if f.magic:
                             _, f.magic_strength = imgui.slider_float("flood", f.magic_strength, 1.0, 100.0, format=f"{f.magic_strength:.1f}%% sensitivity")
                         _, f.alpha = imgui.slider_float("alpha", f.alpha, 0.0, 1.0, format="%.2f")
@@ -1125,7 +1168,7 @@ class SegmentationEditor:
                             for i in f.edited_slices:
                                 imgui.push_id(f"{f.uid}{i}")
 
-                                slice_clicked, _ = imgui.selectable(f"Slice {i} ({len(f.boxes[i])} boxes)", f.current_slice == i, width=cw - 23)
+                                slice_clicked, _ = imgui.selectable(f"Slice {i+1} ({len(f.boxes[i])} boxes)", f.current_slice == i, width=cw - 23)
                                 if imgui.is_item_hovered():
                                     f.parent.set_slice(i)
                                     SegmentationEditor.FRAME_TEXTURE_REQUIRES_UPDATE |= True
@@ -1154,7 +1197,6 @@ class SegmentationEditor:
                             _, SegmentationEditor.FEATURE_IMPORT_MRC_THRESHOLD = imgui.slider_int("##fthslint", SegmentationEditor.FEATURE_IMPORT_MRC_THRESHOLD, 0, 255)
                             imgui.same_line(spacing=5)
                             if imgui.button("slice", (cw - 15) / 3, 15):
-                                print(1)
                                 path = filedialog.askopenfilename(filetypes=[("mrcfile", f".mrc")])
                                 if path != "":
                                     try:
@@ -1163,7 +1205,6 @@ class SegmentationEditor:
                                         cfg.set_error(e, f"Could not initialize Feature using mrc file {path}")
                             imgui.same_line(spacing=5)
                             if imgui.button("volume", (cw - 15) / 3, 15):
-                                print(0)
                                 path = filedialog.askopenfilename(filetypes=[("mrcfile", f".mrc")])
                                 if path != "":
                                     try:
@@ -1193,6 +1234,17 @@ class SegmentationEditor:
 
 
                         imgui.end_child()
+
+                    move = SegmentationEditor.feature_move_request
+                    if move is not None:
+                        SegmentationEditor.feature_move_request = None
+                        f_move, to_top = move
+                        if f_move in features:
+                            features.remove(f_move)
+                            if to_top:
+                                features.insert(0, f_move)
+                            else:
+                                features.append(f_move)
 
                     # 'Add feature' button
                     cw = imgui.get_content_region_available_width()
@@ -1305,6 +1357,7 @@ class SegmentationEditor:
                     elif m.active_tab == 1:
                         _overlap_shown = cfg.settings["TILED_MODE"] == 1 or m.is_3d()   # overlap slider shows when tiling
                         panel_height = SegmentationEditor.MODEL_PANEL_HEIGHT_PREDICTION if _overlap_shown else SegmentationEditor.MODEL_PANEL_HEIGHT_PREDICTION - 16
+                        panel_height += 16  # 'Model-assisted annotation' row
                     elif m.active_tab == 2:
                         panel_height = SegmentationEditor.MODEL_PANEL_HEIGHT_LOGIC + 57 * len(m.interactions) - 20 * (len(cfg.se_models) < 2)
                     panel_height += 10 if m.background_process_train is not None else 0
@@ -1337,20 +1390,7 @@ class SegmentationEditor:
                             imgui.pop_style_var()
                             imgui.end_menu()
                         if imgui.begin_menu("copy output to annotation"):
-                            imgui.push_style_var(imgui.STYLE_FRAME_PADDING, (0, 0))
-                            for feature in cfg.se_active_frame.features:
-                                rgb = feature.colour
-                                imgui.push_style_var(imgui.STYLE_FRAME_ROUNDING, 7)
-                                imgui.color_button(f"##clrbutton{feature.title}", rgb[0], rgb[1], rgb[2], 1.0, 0, 14, 14)
-                                imgui.pop_style_var(1)
-                                imgui.same_line(spacing=5)
-                                if imgui.selectable(feature.title)[1]:
-                                    slice_data = (m.data > m.threshold) * 255
-                                    feature.set_slice_ndarray(slice_data, cfg.se_active_frame.current_slice)
-                                    SegmentationEditor.FORCE_SELECT_TAB_NEXT = 0  # deferred: we are inside the Models tab content, past this frame's Annotation tab item
-                                    progression.award(skill=feature.title, xp=15, color=tuple(feature.colour), cursor_pos=(self.window.cursor_pos[0], self.window.cursor_pos[1]))
-                                    progression.background_spawn(tuple(feature.colour), throttle=False, count=3)
-                            imgui.pop_style_var(1)
+                            self._gui_model_copy_to_annotation(m)
                             imgui.end_menu()
                         imgui.end_popup()
                     imgui.same_line()
@@ -1484,6 +1524,22 @@ class SegmentationEditor:
                             _, _tta = imgui.slider_float("##tta", float(m.tta), 1.0, 8.0, format=f"{m.tta} TTA")   # float slider -> thin grab like the others
                             m.tta = int(round(_tta))
                             imgui.pop_item_width()
+
+                            imgui.text("Model-assisted annotation")
+                            if imgui.is_item_clicked(0):
+                                imgui.open_popup("##maa")
+                            imgui.same_line()
+                            imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + imgui.get_content_region_available_width() - imgui.get_frame_height())
+                            imgui.push_style_color(imgui.COLOR_BUTTON, *cfg.COLOUR_FRAME_BACKGROUND)
+                            imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 1, 1, 1, 0.1)
+                            imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 1, 1, 1, 0.2)
+                            imgui.push_style_color(imgui.COLOR_TEXT, 0.45, 0.45, 0.42, 1.0)
+                            if imgui.arrow_button("##maa_button", imgui.DIRECTION_RIGHT):
+                                imgui.open_popup("##maa")
+                            imgui.pop_style_color(4)
+                            if imgui.begin_popup("##maa"):
+                                self._gui_model_copy_to_annotation(m)
+                                imgui.end_popup()
 
                             _, m.active = imgui.checkbox("active   ", m.active)
                             if _ and m.active:
@@ -3058,15 +3114,54 @@ class SegmentationEditor:
             SegmentationEditor.FORCE_SELECT_TAB = None
             imgui.end_tab_bar()
 
+        self.sync_cameras_on_tab_change()
+
         imgui.end()
         imgui.pop_style_color(1)
 
         slicer_window()
         self._warning_window()
+        self._exit_prompt_window()
         boot_sprite()
         popup_windows()
         imgui.pop_style_color(32)
         imgui.pop_style_var(1)
+
+    def _exit_prompt_window(self):
+        if not SegmentationEditor.EXIT_PROMPT:
+            return
+        unsaved = [f for f in cfg.se_frames if f.unsaved]
+        if not unsaved:
+            SegmentationEditor.EXIT_PROMPT = False
+            return
+        if SegmentationEditor.EXIT_PROMPT_OPEN_REQUESTED:
+            imgui.open_popup("Unsaved annotations##exit")
+            SegmentationEditor.EXIT_PROMPT_OPEN_REQUESTED = False
+        imgui.set_next_window_position(self.window.width // 2, self.window.height // 2, imgui.ALWAYS, 0.5, 0.5)
+        if imgui.begin_popup_modal("Unsaved annotations##exit", None, imgui.WINDOW_ALWAYS_AUTO_RESIZE)[0]:
+            imgui.text(f"{len(unsaved)} dataset{'s' if len(unsaved) > 1 else ''} with unsaved annotation:")
+            for f in unsaved:
+                imgui.text(f"    {f.title}")
+            imgui.spacing()
+            if imgui.button("save all and exit", 120, 23):
+                active_frame = cfg.se_active_frame
+                for f in unsaved:
+                    cfg.se_active_frame = f  # save_dataset() saves whichever frame is active
+                    SegmentationEditor.save_dataset(dialog=False)
+                cfg.se_active_frame = active_frame
+                glfw.set_window_should_close(self.window.glfw_window, True)
+                SegmentationEditor.EXIT_PROMPT = False
+                imgui.close_current_popup()
+            imgui.same_line()
+            if imgui.button("exit anyway", 90, 23):
+                glfw.set_window_should_close(self.window.glfw_window, True)
+                SegmentationEditor.EXIT_PROMPT = False
+                imgui.close_current_popup()
+            imgui.same_line()
+            if imgui.button("cancel", 70, 23):
+                SegmentationEditor.EXIT_PROMPT = False
+                imgui.close_current_popup()
+            imgui.end_popup()
 
     def _warning_window(self):
         def ww_context_menu():
@@ -3078,7 +3173,7 @@ class SegmentationEditor:
                     pyperclip.copy(cfg.error_msg)
                 copy_path_to_log, _ = imgui.menu_item("Copy path to scNodes.log")
                 if copy_path_to_log:
-                    pyperclip.copy(os.path.abspath(cfg.logpath))
+                    pyperclip.copy(os.path.abspath(cfg.log_path))
                 imgui.end_popup()
             imgui.pop_style_color(1)
         ## Error message
@@ -3182,8 +3277,9 @@ class SegmentationEditor:
         if self._glass_circle_button("##party_toggle", D, "sparkle", party_on, (0.98, 0.78, 0.30)):
             new_hidden = not cfg.settings["PROGRESSION_HIDE"]
             cfg.edit_setting("PROGRESSION_HIDE", new_hidden)
-            if not new_hidden:   # turning party ON -> celebrate (only drawn while visible)
-                progression.particles.emit_confetti_burst(_px + D * 0.5, _py + D * 0.5)
+            if not new_hidden:   # turning party ON
+                progression.clear_pending()   # drop any level-up backlog so it doesn't fire a burst of toasts
+                progression.particles.emit_confetti_burst(_px + D * 0.5, _py + D * 0.5)   # celebrate (only drawn while visible)
         self.tooltip("Party mode: " + ("on" if party_on else "off"))
         imgui.same_line(spacing=G)
         dark_on = cfg.settings.get("DARK_MODE", False)
@@ -3363,18 +3459,42 @@ class SegmentationEditor:
             imgui.pop_style_var(1)
             imgui.end_popup()
 
+    def _gui_model_copy_to_annotation(self, m):
+        # pick a feature to copy the model's thresholded output into; used by the model context menu
+        # and by the 'Model-assisted annotation' row in the Prediction tab.
+        if cfg.se_active_frame is None:
+            return
+        imgui.push_style_var(imgui.STYLE_FRAME_PADDING, (0, 0))
+        for feature in cfg.se_active_frame.features:
+            rgb = feature.colour
+            imgui.push_style_var(imgui.STYLE_FRAME_ROUNDING, 7)
+            imgui.color_button(f"##clrbutton{feature.title}", rgb[0], rgb[1], rgb[2], 1.0, 0, 14, 14)
+            imgui.pop_style_var(1)
+            imgui.same_line(spacing=5)
+            if imgui.selectable(feature.title)[1] and m.data is not None:
+                slice_data = (m.data > m.threshold) * 255
+                feature.set_slice_ndarray(slice_data, cfg.se_active_frame.current_slice)
+                SegmentationEditor.FORCE_SELECT_TAB_NEXT = 0  # deferred: we are inside the Models tab content, past this frame's Annotation tab item
+                progression.award(skill=feature.title, xp=15, color=tuple(feature.colour), cursor_pos=(self.window.cursor_pos[0], self.window.cursor_pos[1]))
+                progression.background_spawn(tuple(feature.colour), throttle=False, count=3)
+        imgui.pop_style_var(1)
+
     def _gui_feature_collapse_context_menu(self, feature, popup_id):
         # Small right-click menu on an annotation feature panel: fold panels down.
         if imgui.begin_popup(popup_id):
             collapsed = getattr(feature, "collapsed", False)
-            if imgui.menu_item("expand" if collapsed else "collapse")[0]:
+            if imgui.menu_item("Expand" if collapsed else "Collapse")[0]:
                 feature.collapsed = not collapsed
-            if imgui.menu_item("collapse all")[0]:
+            if imgui.menu_item("Collapse all")[0]:
                 for f in feature.parent.features:
                     f.collapsed = True
-            if imgui.menu_item("expand all")[0]:
+            if imgui.menu_item("Expand all")[0]:
                 for f in feature.parent.features:
                     f.collapsed = False
+            if imgui.menu_item("Move to top")[0]:
+                SegmentationEditor.feature_move_request = (feature, True)
+            if imgui.menu_item("Move to bottom")[0]:
+                SegmentationEditor.feature_move_request = (feature, False)
             imgui.end_popup()
 
     @staticmethod
@@ -3770,12 +3890,47 @@ class SegmentationEditor:
         except Exception as e:
             cfg.set_error(e, "Could not open volumes in ChimeraX - is the path to the ChimeraX executable set? See Settings -> 3rd Party Applications -> ChimeraX.")
 
+    # ---- 2D <-> 3D camera linking -------------------------------------------------------------
+    # Both cameras work in nm. The 2D camera is orthographic, so its visible half-height is
+    # window_height / (2 * zoom); the 3D one is perspective (60 deg FOV), so at the focus plane its
+    # half-height is distance * tan(30 deg). Equating the two gives the conversions below. The
+    # centred world point is -camera.position[:2] in 2D and camera3d.focus[:2] in 3D.
+    _HALF_FOV_TAN = np.tan(np.radians(30.0))
+
+    def _zoom_to_distance(self, zoom):
+        return cfg.window_height / (2.0 * max(zoom, 1e-6) * SegmentationEditor._HALF_FOV_TAN)
+
+    def _distance_to_zoom(self, distance):
+        return cfg.window_height / (2.0 * max(distance, 1e-6) * SegmentationEditor._HALF_FOV_TAN)
+
+    def sync_cameras_on_tab_change(self):
+        """Carry pan + zoom across the 2D tabs (Annotation/Models/Export) and the 3D Render tab, so
+        switching tabs keeps the same region on screen at the same scale. Only fires on the frame the
+        tab actually changes, so normal camera use in either tab is untouched."""
+        previous, current = self._previous_tab, self.active_tab
+        self._previous_tab = current
+        if previous == current:
+            return
+        was_3d, is_3d = previous == "Render", current == "Render"
+        if was_3d == is_3d:
+            return   # moved between two 2D tabs; nothing to carry
+        if is_3d:
+            self.camera3d.focus[0] = -self.camera.position[0]
+            self.camera3d.focus[1] = -self.camera.position[1]
+            self.camera3d.distance = self._zoom_to_distance(self.camera.zoom)
+            self.camera3d.on_update()
+        else:
+            self.camera.position[0] = -self.camera3d.focus[0]
+            self.camera.position[1] = -self.camera3d.focus[1]
+            self.camera.zoom = self._distance_to_zoom(self.camera3d.distance)
+            self.camera.on_update()
+
     def camera_control(self):
         if imgui.get_io().want_capture_mouse or imgui.get_io().want_capture_keyboard:
             pass
         elif self.active_tab != "Render":
-            if self.window.get_mouse_button(glfw.MOUSE_BUTTON_MIDDLE):
-                delta_cursor = self.window.cursor_delta
+            if self.window.get_mouse_button(glfw.MOUSE_BUTTON_MIDDLE) and not SegmentationEditor.is_ctrl_down():
+                delta_cursor = self.window.cursor_delta   # ctrl+middle is reserved for brush-size drag
                 self.camera.position[0] += delta_cursor[0] / self.camera.zoom
                 self.camera.position[1] -= delta_cursor[1] / self.camera.zoom
             if SegmentationEditor.is_shift_down() and self.window.scroll_delta[1] != 0.0:
@@ -3921,6 +4076,7 @@ class Brush:
 
         segmentation.data[x[0]:x[1], y[0]:y[1]] = np.clip(segmentation.data[x[0]:x[1], y[0]:y[1]], 0, 1)
         segmentation.texture.update_subimage(segmentation.data[x[0]:x[1], y[0]:y[1]], y[0], x[0])
+        segmentation.parent.unsaved = True
 
     @staticmethod
     def apply_magic(segmentation, image, center_coordinates):
@@ -3992,6 +4148,7 @@ class Brush:
         segmentation.data[x[0]:x[1], y[0]:y[1]] += contiguous_mask
         segmentation.data[x[0]:x[1], y[0]:y[1]] = np.clip(segmentation.data[x[0]:x[1], y[0]:y[1]], 0, 1)
         segmentation.texture.update_subimage(segmentation.data[x[0]:x[1], y[0]:y[1]], y[0], x[0])
+        segmentation.parent.unsaved = True
 
 
 class Renderer:
@@ -4933,13 +5090,47 @@ class QueuedExport:
                 print(f"QueuedExport - applying model {m.title} ({m.info})")
                 self.colour = m.colour
                 m_norm = global_stats(mrcd) if cfg.settings["NORMALIZATION"] == "global" else None
-                for j in range(self.dataset.export_bottom, self.dataset.export_top):
-                    self.check_stop_request()
-                    j_indices = np.clip(np.arange(j - m.model_depth // 2, j - m.model_depth // 2 + m.model_depth), 0, n_slices - 1)
-                    segmented_slice = m.apply_to_slice(mrcd[j_indices, rx[0]:rx[1], ry[0]:ry[1]], self.dataset.pixel_size, norm_stats=m_norm) * 255
-                    segmentations[m_idx, j, rx[0]:rx[1], ry[0]:ry[1]] = segmented_slice
-                    n_slices_complete += 1
-                    self.process.set_progress(min([0.999, n_slices_complete / n_slices_total]))
+                bottom, top = self.dataset.export_bottom, self.dataset.export_top
+                if m.is_3d():
+                    # strided-Z slab inference (like the CLI's _infer_slab): step Z by depth//2, run a
+                    # FULL slab per step and overlap-blend, instead of re-running the model per output
+                    # slice. ~depth/stride fewer forward passes. Only the trained output positions
+                    # [centre +/- z_jitter/2] contribute (top-hat), so untrained margins come out 0.
+                    depth = m.model_depth
+                    stride = max(1, depth // 2)
+                    jitter_half = m.z_jitter // 2
+                    wz = ((np.abs(np.arange(depth) - depth // 2) <= jitter_half).astype(np.float32)
+                          if jitter_half > 0 else np.ones(depth, dtype=np.float32))
+                    acc = np.zeros((n_slices, rx[1] - rx[0], ry[1] - ry[0]), dtype=np.float32)
+                    cnt = np.zeros(n_slices, dtype=np.float32)
+                    hi = max(0, min(top, n_slices) - depth)
+                    starts = list(range(max(0, bottom - depth // 2), hi + 1, stride))
+                    if not starts or starts[-1] != hi:
+                        starts.append(hi)
+                    for z0 in starts:
+                        self.check_stop_request()
+                        window = mrcd[z0:z0 + depth, rx[0]:rx[1], ry[0]:ry[1]]
+                        if window.shape[0] < depth:
+                            window = np.pad(window, ((0, depth - window.shape[0]), (0, 0), (0, 0)), mode='reflect')
+                        slab = m.apply_to_slab(window, self.dataset.pixel_size, norm_stats=m_norm)   # (depth, Y, X)
+                        z1 = min(z0 + depth, n_slices)
+                        acc[z0:z1] += wz[:z1 - z0, None, None] * slab[:z1 - z0]
+                        cnt[z0:z1] += wz[:z1 - z0]
+                        n_slices_complete += stride
+                        self.process.set_progress(min([0.999, n_slices_complete / n_slices_total]))
+                    sel = cnt > 0
+                    acc[sel] /= cnt[sel][:, None, None]
+                    out = np.zeros_like(acc)
+                    out[bottom:top] = np.clip(acc[bottom:top], 0.0, 1.0)   # only the exported Z range; rest stays 0
+                    segmentations[m_idx, :, rx[0]:rx[1], ry[0]:ry[1]] = (out * 255).astype(np.uint8)
+                else:
+                    for j in range(bottom, top):
+                        self.check_stop_request()
+                        j_indices = np.clip(np.arange(j - m.model_depth // 2, j - m.model_depth // 2 + m.model_depth), 0, n_slices - 1)
+                        segmented_slice = m.apply_to_slice(mrcd[j_indices, rx[0]:rx[1], ry[0]:ry[1]], self.dataset.pixel_size, norm_stats=m_norm) * 255
+                        segmentations[m_idx, j, rx[0]:rx[1], ry[0]:ry[1]] = segmented_slice
+                        n_slices_complete += 1
+                        self.process.set_progress(min([0.999, n_slices_complete / n_slices_total]))
                 m_idx += 1
 
             # apply competition

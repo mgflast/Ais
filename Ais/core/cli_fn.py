@@ -1,4 +1,4 @@
-import os, sys, time, shutil, multiprocessing, glob, itertools, glfw, mrcfile, json, random
+import os, sys, time, math, shutil, multiprocessing, glob, itertools, glfw, mrcfile, json, random
 from collections import Counter
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # suppress TF C++ INFO and WARNING before import
 from Ais.core.se_frame import SEFrame
@@ -61,12 +61,30 @@ def _parse_input_for_slice(input_volume, j, model_depth, model_dimensionality):
         return np.transpose(slab, (1, 2, 0))
 
 
-def _infer_slab(model, vi, depth, z_start, z_end, batch_size, jitter_half=0):
+INFERENCE_TILE_3D = 512         # CLI 3D XY tile size (net is fully-conv, so decoupled from box_size)
+INFERENCE_OVERLAP_PX_3D = 64    # discarded border per tile side, as in easymode; stride = tile - 2*overlap
+
+
+def _tile_starts(n, tile, stride):
+    """Start offsets covering [0, n) with `tile`-wide windows, last one flush against the end."""
+    if n <= tile:
+        return [0]
+    starts = list(range(0, n - tile + 1, stride))
+    if starts[-1] != n - tile:
+        starts.append(n - tile)
+    return starts
+
+
+def _infer_slab(model, vi, depth, z_start, z_end, jitter_half=0, tile=None, overlap=None):
     """Slab (3D) inference for a model that emits a full Z-slab: tile [z_start, z_end) into
-    overlapping depth-`depth` slabs, run each, and blend the outputs in Z. Each slab slice is
-    weighted by a trapezoid peaking over the trained reliable range [center +/- jitter_half]
-    (uniform if jitter_half == 0). vi is (Z, Y, X); slices outside [z_start, z_end) are left at 0."""
-    nz = vi.shape[0]
+    overlapping depth-`depth` slabs AND tile each slab in XY, run each tile, and blend. Each slab
+    slice is weighted by a trapezoid peaking over the trained reliable range [center +/- jitter_half]
+    (uniform if jitter_half == 0); in XY only each tile's centre contributes, its `overlap` border
+    being covered by the neighbouring tile's centre (same scheme as the GUI's boxes_to_slice).
+    Z tiling is not configurable - the slab depth is the model's. One tile per model call.
+    tile < 0 disables XY tiling: the whole plane goes through in one piece, as it used to.
+    vi is (Z, Y, X); slices outside [z_start, z_end) are left at 0."""
+    nz, ny, nx = vi.shape
     stride = max(1, depth // 2)   # 50% Z overlap -> each slice covered by ~2 slabs
     if nz <= depth:
         starts = [0]
@@ -85,32 +103,95 @@ def _infer_slab(model, vi, depth, z_start, z_end, batch_size, jitter_half=0):
     else:
         w = np.ones(depth, dtype=np.float32)
 
+    # ---- XY tiling: reflect-pad so boundary tiles see real context, then cover the padded plane
+    # with tile-sized windows. vi arrives already padded by _pad_volume; `context` adds the border
+    # the centre-only mask trims, so the real image is covered by tile CENTRES, not trimmed edges.
+    if tile is not None and int(tile) < 0:   # -1: no tiling, whole (already 32-aligned) plane at once
+        ty, tx, margin, context = ny, nx, 0, 0
+    else:
+        ty = tx = max(32, int(tile or INFERENCE_TILE_3D) // 32 * 32)   # the encoder pools XY 4x; off-multiples desync the skips
+        margin = int(INFERENCE_OVERLAP_PX_3D if overlap is None else overlap)
+        if margin > ty // 3:   # as in easymode: keep the stride at a workable >= tile/3
+            print("\033[93m" + f'warning: an overlap of {margin} is too large for a tile size of {ty}; '
+                  f'reducing it to {ty // 3}.' + "\033[0m")
+            margin = ty // 3
+        context = max(64, margin)
+
+    def _pad_for_tiles(n, t):
+        stride_xy = t - 2 * margin
+        padded = max(t, n + 2 * context)
+        padded += (stride_xy - (padded - t) % stride_xy) % stride_xy   # align so tiles cover exactly
+        return context, padded - n - context
+
+    (ply, phy), (plx, phx) = _pad_for_tiles(ny, ty), _pad_for_tiles(nx, tx)
+    py, px = ny + ply + phy, nx + plx + phx
+
+    # XY-pad one slab at a time, not the whole volume (that would cost ~1 GB for a big tomogram).
+    # jobs are z0-major and batches are contiguous, so each slab is built exactly once.
+    _cache = {'z0': None, 'slab': None}
+
+    def _padded_slab(z0):
+        if _cache['z0'] != z0:
+            s = vi[z0:z0 + depth]
+            if s.shape[0] < depth:      # volume thinner than one slab
+                s = np.pad(s, ((0, depth - s.shape[0]), (0, 0), (0, 0)), mode='reflect')
+            _cache['z0'], _cache['slab'] = z0, np.pad(s, ((0, 0), (ply, phy), (plx, phx)), mode='reflect')
+        return _cache['slab']
+
+    mask = np.ones((ty, tx), dtype=np.float32)
+    if margin > 0:
+        mask[:margin, :] = 0
+        mask[-margin:, :] = 0
+        mask[:, :margin] = 0
+        mask[:, -margin:] = 0
+
+    jobs = [(z0, y0, x0) for z0 in starts
+            for y0 in _tile_starts(py, ty, ty - 2 * margin)
+            for x0 in _tile_starts(px, tx, tx - 2 * margin)]
+
+    # every XY tile runs for every Z slab, so coverage separates: cnt[z,y,x] = cnt_z[z] * cnt_xy[y,x]
     acc = np.zeros_like(vi, dtype=np.float32)
-    cnt = np.zeros(nz, dtype=np.float32)
-    for bs in range(0, len(starts), batch_size):
-        chunk = starts[bs:bs + batch_size]
-        slabs = []
-        for z0 in chunk:
-            slab = vi[z0:z0 + depth]
-            if slab.shape[0] < depth:   # volume thinner than one slab
-                slab = np.pad(slab, ((0, depth - slab.shape[0]), (0, 0), (0, 0)), mode='reflect')
-            slabs.append(np.transpose(slab, (1, 2, 0))[..., np.newaxis])   # (Y, X, depth, 1)
-        out = np.squeeze(model(np.stack(slabs), training=False).numpy(), axis=-1)   # (B, Y, X, depth)
-        for i, z0 in enumerate(chunk):
-            z1 = min(z0 + depth, nz)
-            d = z1 - z0
-            acc[z0:z1] += w[:d, None, None] * np.transpose(out[i], (2, 0, 1))[:d]
-            cnt[z0:z1] += w[:d]
+    cnt_z = np.zeros(nz, dtype=np.float32)
+    cnt_xy = np.zeros((ny, nx), dtype=np.float32)
+    seen_z, seen_xy = set(), set()
+
+    for z0, y0, x0 in jobs:
+        slab = _padded_slab(z0)[:, y0:y0 + ty, x0:x0 + tx]
+        inp = np.transpose(slab, (1, 2, 0))[np.newaxis, ..., np.newaxis]   # (1, tile, tile, depth, 1)
+        out = np.squeeze(model(inp, training=False).numpy(), axis=(0, -1))   # (tile, tile, depth)
+
+        z1 = min(z0 + depth, nz)
+        d = z1 - z0
+        # tile spans padded rows [y0, y0+tile) -> unpadded [y0-ply, ...); clip to the real plane
+        oy, ox = y0 - ply, x0 - plx
+        sy0, sy1 = max(0, oy), min(ny, oy + ty)
+        sx0, sx1 = max(0, ox), min(nx, ox + tx)
+        if sy0 >= sy1 or sx0 >= sx1:
+            continue
+        ty0, tx0 = sy0 - oy, sx0 - ox
+        m = mask[ty0:ty0 + (sy1 - sy0), tx0:tx0 + (sx1 - sx0)]
+        o = np.transpose(out, (2, 0, 1))[:d, ty0:ty0 + (sy1 - sy0), tx0:tx0 + (sx1 - sx0)]
+        acc[z0:z1, sy0:sy1, sx0:sx1] += w[:d, None, None] * m[None, :, :] * o
+        # each distinct tile / slab start contributes to its count exactly once, even though the
+        # same z0 recurs across tiles and the same tile across slabs
+        if (y0, x0) not in seen_xy:
+            cnt_xy[sy0:sy1, sx0:sx1] += m
+            seen_xy.add((y0, x0))
+        if z0 not in seen_z:
+            cnt_z[z0:z1] += w[:d]
+            seen_z.add(z0)
 
     si = np.zeros_like(vi, dtype=np.float32)
-    m = cnt > 0
-    si[m] = acc[m] / cnt[m][:, None, None]
+    for z in range(nz):   # per-slice, so the (nz, ny, nx) denominator is never materialised
+        if cnt_z[z] > 0:
+            dz = cnt_z[z] * cnt_xy
+            np.divide(acc[z], dz, out=si[z], where=dz > 0)
     si[:z_start] = 0.0
     si[z_end:] = 0.0
     return si
 
 
-def _preprocess_tomo(tomo_path, model_apix, normalization=None):
+def _preprocess_tomo(tomo_path, model_apix, normalization=None, data_apix=None):
     with mrcfile.open(tomo_path) as m:
         if normalization == NORM_GLOBAL_MAD and m.data.dtype == np.int8:
             volume = m.data.view(np.uint8).astype(np.float32)   # match GUI/extract int8 convention
@@ -119,7 +200,10 @@ def _preprocess_tomo(tomo_path, model_apix, normalization=None):
         volume_apix = float(m.voxel_size.x)
         in_voxel_size = m.voxel_size
         original_shape = volume.shape
-    if model_apix is not None and volume_apix == 1.0:
+    if data_apix is not None:
+        # user override of the header value; 0.0 means segment at the native scale (no rescaling)
+        volume_apix = float(data_apix) if data_apix > 0.0 else float(model_apix or volume_apix)
+    elif model_apix is not None and volume_apix == 1.0:
         print(f'warning: {tomo_path} header lists voxel size as 1.0 A/px, which might be incorrect.')
     if volume_apix == 0.0:
         print(f'warning: volume apix is 0.0 so we cannot determine the scaling factor. we will assume the real pixel size is 10.0')
@@ -158,9 +242,45 @@ def _bin_volume_xy(vol, b=1):
         return vol
 
 
-def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_augmentation=1, overwrite=False, model_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=4, center=100.0):
+_PLACEHOLDER_BYTES = 8192   # the 10x10x10 claim file is ~5 kB; a real segmentation is megabytes
+_claimed_outputs = set()    # claim files THIS process wrote and has not yet overwritten with real data
+
+
+def _claim_output(path):
+    _claimed_outputs.add(path)
+
+
+def _release_output(path):
+    _claimed_outputs.discard(path)
+
+
+def _drop_claimed_outputs():
+    """Remove the claim files this process is still holding, on cancellation. Only its own: sibling
+    jobs on other nodes segment into the same directory, and their claim files mark tomograms they
+    are still working on. The size check keeps a just-finished real segmentation safe."""
+    for path in list(_claimed_outputs):
+        _claimed_outputs.discard(path)
+        try:
+            if os.path.getsize(path) <= _PLACEHOLDER_BYTES:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _install_claim_cleanup():
+    import atexit, signal
+    atexit.register(_drop_claimed_outputs)
+    try:   # terminate() / scancel would otherwise skip atexit and leak the claim file
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+    except (ValueError, OSError):
+        pass
+
+
+def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_augmentation=1, overwrite=False, model_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=4, center=100.0, tile_size=None, overlap=None, data_apix=None):
     from keras.models import clone_model
     from keras.layers import Input
+
+    _install_claim_cleanup()
 
     if isinstance(gpu_id, int):
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -234,6 +354,8 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
         except Exception as e:
             print(f"Error postprocessing {p}:\n{e}")
             return
+        finally:
+            _release_output(out_path)
         completed[0] += 1
         processed[0] += 1
         _print(j, p)
@@ -247,10 +369,10 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
     def _submit_preproc():
         for j, p in enumerate(data_paths):
             out_path = os.path.join(output_dir, os.path.basename(os.path.splitext(p)[0]) + "__" + se_model.title + ".mrc")
-            if os.path.exists(out_path) and not overwrite:
-                preproc_q.put(('skip', j, p, out_path, None))
+            if os.path.exists(out_path) and not overwrite:   # cheap pre-filter; the inference loop
+                preproc_q.put(('skip', j, p, out_path, None))   # checks again just before it starts
             else:
-                preproc_q.put(('ready', j, p, out_path, executor.submit(_preprocess_tomo, p, model_apix, se_model.normalization)))
+                preproc_q.put(('ready', j, p, out_path, executor.submit(_preprocess_tomo, p, model_apix, se_model.normalization, data_apix)))
         preproc_q.put(None)
 
     threading.Thread(target=_submit_preproc, daemon=True).start()
@@ -274,10 +396,17 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
         except Exception as e:
             print(f"Error preprocessing {p}:\n{e}")
             continue
+        # re-check right before starting: a sibling job on another node may have claimed this
+        # tomogram while it was queued or preprocessing here
+        if os.path.exists(out_path) and not overwrite:
+            completed[0] += 1
+            _print(j, p, skipped=True)
+            continue
         try:
             with mrcfile.new(out_path, overwrite=True) as mrc:
                 mrc.set_data(np.zeros((10, 10, 10), dtype=np.float32))
                 mrc.voxel_size = 1.0
+            _claim_output(out_path)
             volume = prepared['volume']
             padding = prepared['padding']
             pt, pb, pl, pr = padding
@@ -292,7 +421,7 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
                 z_start = (n_z - n_center) // 2
                 z_end = z_start + n_center
                 if is_slab:
-                    si = _infer_slab(new_model, vi, model_depth, z_start, z_end, batch_size, se_model.z_jitter // 2)
+                    si = _infer_slab(new_model, vi, model_depth, z_start, z_end, se_model.z_jitter // 2, tile_size, overlap)
                 else:
                     for bs in range(z_start, z_end, batch_size):
                         bjs = list(range(bs, min(bs + batch_size, z_end)))
@@ -306,6 +435,7 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
             seg = np.clip(seg / test_time_augmentation, 0.0, 1.0)
             postproc_futures.append(executor.submit(_postprocess, j, p, out_path, seg, prepared))
         except Exception as e:
+            _release_output(out_path)   # placeholder is left in place, as before
             print(f"Error segmenting {p}:\n{e}")
 
     for fut in postproc_futures:
@@ -313,7 +443,7 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
     executor.shutdown(wait=False)
 
 
-def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus, test_time_augmentation=1, parallel=1, overwrite=0, processing_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=None, center=100.0):
+def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus, test_time_augmentation=1, parallel=1, overwrite=0, processing_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=None, center=100.0, tile_size=None, overlap=None, data_apix=None):
     if n_workers is None:
         n_workers = min(16, max(1, (os.cpu_count() or 1) // len(gpus)))
     if not os.path.isabs(model_path):
@@ -391,7 +521,10 @@ def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus,
                     postprocessing_sigma,
                     batch_size,
                     n_workers,
-                    center
+                    center,
+                    tile_size,
+                    overlap,
+                    data_apix
                 ),
             )
             processes.append(p)
@@ -413,7 +546,10 @@ def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus,
             postprocessing_sigma,
             batch_size,
             n_workers,
-            center
+            center,
+            tile_size,
+            overlap,
+            data_apix
         )
 
 
@@ -461,7 +597,7 @@ def resolve_model_architecture(architecture):
     exit(1)
 
 
-def train_model(training_data, output_directory, architecture=None, epochs=50, batch_size=32, negatives=0.0, copies=4, model_path='', gpus="0", parallel=1, rate=1e-3, name="Unnamed model", extra_augmentations=False):
+def train_model(training_data, output_directory, architecture=None, epochs=50, batch_size=32, negatives=0.0, copies=4, model_path='', gpus="0", parallel=1, rate=1e-3, name="Unnamed model", extra_augmentations=False, filament=None):
     import keras.callbacks
 
     architecture = resolve_model_architecture(architecture)
@@ -519,6 +655,7 @@ def train_model(training_data, output_directory, architecture=None, epochs=50, b
     model.batch_size = batch_size
     model.excess_negative = int((100 * negatives) - 100)
     model.n_copies = copies
+    model.filament_diameter = filament
 
     os.environ["CUDA_VISIBLE_DEVICES"] = gpus
     checkpoint_callback = CheckpointCallback(model, os.path.join(output_directory, f"{model.title}{cfg.filetype_semodel}"))
@@ -580,11 +717,178 @@ def _clr_print(txt, clr):
     print(f"{colors[clr]}{txt}\033[0m")
 
 
-def _picking_thread(data_paths, output_directory, margin, threshold, binning, spacing, size, spacing_px, size_px, process_id, verbose, filament=False, filament_length=500.0, filament_length_px=None, centroid=False, min_particles=0, twist_per_sample=0.0, orient=None, orient_sign='z'):
+class _PickDisplay:
+    """Live multi-line console region for `ais pick`: a tqdm-style progress bar over the tomograms,
+    a 'particles found' line, and a histogram of particles per tomogram - rewritten in place with
+    ANSI cursor moves, like _ScanDisplay (and using tqdm's own format_meter for the bar, so the two
+    commands look identical). Counts arrive from the worker processes over a queue.
+    Non-TTY: prints the final block once instead of animating."""
+
+    NBINS = 6
+    RELOCK = 25   # tomograms the axis must stay too roomy before it is allowed to shrink
+
+    def __init__(self, total, filament=False, min_particles=0, live=True):
+        self.enabled = total > 0
+        self.total = max(1, total)
+        self.filament = filament
+        self.min_particles = min_particles
+        self.n = 0
+        self.particles = 0
+        self.filaments = 0
+        self.tomos = 0        # tomograms with at least one particle
+        self.below = 0        # tomograms under --min-particles (no .star written)
+        self.counts = []      # particles per tomogram, for the histogram
+        self.lo = 0           # histogram axis: first bin edge
+        self.step = 0         # histogram bin width; 0 until enough tomograms to choose one
+        self._scaled_at = 0   # self.n when the axis last changed (shrink cooldown)
+        self.tty = sys.stdout.isatty() and live   # --verbose keeps the per-tomogram lines instead
+        self.nlines = 2 + self.NBINS
+        self.t0 = time.time()
+        self._drawn = False
+        self._last = 0.0
+        try:
+            from tqdm.utils import _supports_unicode
+            self.ascii = not _supports_unicode(sys.stdout)
+        except Exception:
+            self.ascii = 'utf' not in ((getattr(sys.stdout, 'encoding', '') or '').lower())
+
+    @staticmethod
+    def _ncols():
+        return max(20, shutil.get_terminal_size(fallback=(100, 24)).columns - 1)
+
+    @staticmethod
+    def _nice_step(x):
+        # round a bin width up to 1, 2 or 5 x 10^k so the histogram edges stay readable
+        if x <= 1:
+            return 1
+        e = math.floor(math.log10(x))
+        f = x / 10 ** e
+        for m in (1, 2, 5):
+            if f <= m:
+                return max(1, int(m * 10 ** e))
+        return max(1, int(10 ** (e + 1)))
+
+    def _bar_line(self, ncols):
+        from tqdm import tqdm as _tqdm
+        return _tqdm.format_meter(self.n, self.total, time.time() - self.t0, ncols=ncols,
+                                  prefix='picking', unit='tomo', ascii=self.ascii)
+
+    def _count_line(self, ncols):
+        unit = 'tomogram' if self.tomos == 1 else 'tomograms'
+        if self.filament:
+            txt = f"{self.particles} coordinates in {self.filaments} filaments, in {self.tomos} {unit}"
+        else:
+            txt = f"{self.particles} particles in {self.tomos} {unit}"
+        if self.below:
+            txt += f"  ({self.below} below --min-particles)"
+        if len(txt) > ncols:
+            ell = '...' if self.ascii else '…'
+            txt = txt[:max(0, ncols - len(ell))] + ell
+        return f"\033[96m{txt}\033[0m"
+
+    def _rescale(self):
+        if len(self.counts) < 3:
+            return
+        lo_p = float(np.percentile(self.counts, 5))
+        hi_p = float(np.percentile(self.counts, 95))
+        if hi_p <= 0:                          # nearly everything empty: fall back to the few hits
+            hi_p = float(max(self.counts))
+        if hi_p <= 0:
+            return
+        if self.step:
+            span = self.NBINS * self.step
+            fits = self.lo <= lo_p and hi_p <= self.lo + span
+            if fits and ((hi_p - lo_p) >= 0.35 * span or self.n - self._scaled_at < self.RELOCK):
+                return
+        step = self._nice_step((hi_p - lo_p) / self.NBINS)
+        lo = int(math.floor(lo_p / step) * step)
+        if lo <= step:                         # close enough to zero - anchor there
+            lo = 0
+        if (lo, step) != (self.lo, self.step):
+            self.lo, self.step = lo, step
+            self._scaled_at = self.n
+
+    def _hist_lines(self, ncols):
+        # always NBINS lines, so the live region keeps a fixed height
+        if not self.step:
+            return [""] * self.NBINS
+        hist = [0] * self.NBINS
+        for c in self.counts:
+            hist[min(self.NBINS - 1, max(0, int((c - self.lo) // self.step)))] += 1
+        peak = max(hist)
+        edges = [self.lo + i * self.step for i in range(self.NBINS)]
+        ew = len(str(edges[-1] + self.step))
+        lw = 2 * ew + 1
+        cw = len(str(peak))
+        sep = '|' if self.ascii else '│'
+        barw = max(4, min(40, ncols - (lw + 2 + cw + 2)))
+        labels = [f"{edges[i]:>{ew}}-{edges[i + 1]:>{ew}}" for i in range(self.NBINS - 1)]
+        labels.append(f"{str(edges[-1]) + '+':>{lw}}")            # outer bins hold the tails
+        if self.lo:
+            labels[0] = f"{'<' + str(edges[1]):>{lw}}"
+        lines = []
+        for label, h in zip(labels, hist):
+            fill = barw * h / peak
+            if self.ascii:
+                bar = '#' * int(round(fill))
+            else:
+                frac = int((fill - int(fill)) * 8)
+                bar = '█' * int(fill) + (' ▏▎▍▌▋▊▉'[frac] if frac else '')
+            lines.append(f"\033[90m {label} {sep}{bar:<{barw}} {h:>{cw}}\033[0m")
+        return lines
+
+    def _render(self):
+        ncols = self._ncols()
+        out = f"\033[{self.nlines}A" if self._drawn else ""
+        for ln in [self._bar_line(ncols), self._count_line(ncols)] + self._hist_lines(ncols):
+            out += "\033[2K" + ln + "\n"
+        sys.stdout.write(out); sys.stdout.flush()
+        self._drawn = True
+        self._last = time.time()
+
+    def add(self, n_particles, n_filaments):
+        self.n += 1
+        self.counts.append(n_particles)
+        if n_particles < self.min_particles:
+            self.below += 1
+        else:
+            self.particles += n_particles
+            self.filaments += n_filaments
+            if n_particles:
+                self.tomos += 1
+        self._rescale()
+        if self.enabled and self.tty:
+            self._render()
+
+    def tick(self):
+        # keep elapsed / eta moving while waiting on the workers
+        if self.enabled and self.tty and self._drawn and time.time() - self._last > 0.25:
+            self._render()
+
+    def finish(self):
+        if not self.enabled:
+            return
+        if self.tty:
+            self._render()
+        else:
+            ncols = self._ncols()
+            print(self._bar_line(ncols))
+            print(self._count_line(ncols))
+            for ln in self._hist_lines(ncols):
+                if ln:
+                    print(ln)
+
+
+def _picking_thread(data_paths, output_directory, margin, threshold, binning, spacing, size, spacing_px, size_px, process_id, verbose, filament=False, filament_length=500.0, filament_length_px=None, centroid=False, min_particles=0, twist_per_sample=0.0, orient=None, orient_sign='z', queue=None, quiet=False):
     try:
         for j, p in enumerate(data_paths):
             out_path = os.path.join(output_directory, os.path.splitext(os.path.basename(p))[0]+"_coords.star")
             n_particles, n_filaments = _pick_tomo(p, out_path, margin, threshold, binning, spacing, size, spacing_px, size_px, verbose, filament, filament_length, filament_length_px, centroid, min_particles, twist_per_sample, orient, orient_sign)
+
+            if queue is not None:
+                queue.put((n_particles, n_filaments))
+            if quiet:
+                continue
 
             if n_particles < min_particles:
                 _clr_print(
@@ -654,16 +958,35 @@ def dispatch_parallel_pick(target, data_directory, output_directory, margin, thr
     for p_id, data_path in zip(itertools.cycle(range(parallel)), all_data_paths):
         data_div[p_id].append(data_path)
 
+    # live progress bar + counts in the parent; workers report every tomogram over a queue and stay
+    # quiet. With --verbose they keep printing their per-tomogram lines instead.
+    from queue import Empty
+    live = sys.stdout.isatty() and not verbose
+    disp = _PickDisplay(len(all_data_paths), filament=filament, min_particles=min_particles, live=live)
+    result_queue = multiprocessing.Queue()
+
     processes = []
     try:
         for p_id in data_div:
             p = multiprocessing.Process(target=_picking_thread,
-                                        args=(data_div[p_id], output_directory, margin, threshold, binning, spacing, size, spacing_px, size_px, p_id, verbose, filament, filament_length, None, centroid, min_particles, twist_per_sample, orient, orient_sign))
+                                        args=(data_div[p_id], output_directory, margin, threshold, binning, spacing, size, spacing_px, size_px, p_id, verbose, filament, filament_length, None, centroid, min_particles, twist_per_sample, orient, orient_sign, result_queue, live))
             processes.append(p)
             p.start()
 
+        while any(p.is_alive() for p in processes):
+            try:
+                disp.add(*result_queue.get(timeout=0.25))
+            except Empty:
+                disp.tick()
+        while disp.n < len(all_data_paths):   # results still in flight after the last worker exited
+            try:
+                disp.add(*result_queue.get(timeout=0.5))
+            except Empty:
+                break
+
         for p in processes:
             p.join()
+        disp.finish()
     except KeyboardInterrupt:
         for p in processes:
             if p.is_alive():
@@ -707,6 +1030,7 @@ class _ScanDisplay:
         self.nlines = 1 + len(self.features)
         self.t0 = time.time()
         self._drawn = False
+        self._last_draw = 0.0
         # format_meter() defaults to Unicode block glyphs; fall back to ASCII when the stream
         # can't encode them (matches how the tqdm object behaves on a non-UTF console).
         try:
@@ -747,6 +1071,10 @@ class _ScanDisplay:
     def start_tomo(self):
         self.n += 1
         if self.tty:
+            now = time.time()
+            if now - self._last_draw < 0.1 and self.n < self.total:
+                return
+            self._last_draw = now
             self._render()
 
     def add(self, feature, nboxes, flavours):
@@ -771,6 +1099,7 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
     import Ais.core.se_scnt as se_scnt
     from tqdm import tqdm
     from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     MERGED_GROUP = "__merged__"
     # for any slab (box_depth > 1) store 4 extra slices top & bottom, so 3D training can jitter the
@@ -801,20 +1130,19 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
     disp = _ScanDisplay(len(annotated_tomograms), features, se_scnt.DEFAULT_ANNOTATED_FLAVOUR)
     apix = float(apix)   # target pixel size for the extracted boxes (written to header + filename)
 
-    # ---- scout: load every .scns, collect box coordinates + label patches ----
-    for annotation in annotated_tomograms:
-        disp.start_tomo()
+    def _scan_one(annotation):
+        w_notes, w_adds, w_tasks, w_coords = [], [], [], []
         stem = os.path.splitext(os.path.basename(annotation))[0]
         if stem in excluded_files:
-            notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)} - excluded' + '\033[0m')
-            continue
+            w_notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)} - excluded' + '\033[0m')
+            return w_notes, w_adds, w_tasks, w_coords
 
         try:
             with open(annotation, 'rb') as pf:
-                se_frame = pickle.load(pf)
+                se_frame = pickle.loads(pf.read())   # one sequential read; the unpickler would issue many small ones
         except Exception as e:
-            notes.append(f"error loading {os.path.basename(annotation)}: {e}")
-            continue
+            w_notes.append(f"error loading {os.path.basename(annotation)}: {e}")
+            return w_notes, w_adds, w_tasks, w_coords
 
         tomo = se_frame.path
         if not os.path.exists(tomo):
@@ -822,12 +1150,12 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
 
         tomo_stem = os.path.splitext(os.path.basename(tomo))[0]
         if tomo_stem in excluded_files:
-            notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)} - excluded' + '\033[0m')
-            continue
+            w_notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)} - excluded' + '\033[0m')
+            return w_notes, w_adds, w_tasks, w_coords
 
         if not coordinates and not os.path.exists(tomo):
-            notes.append('\033[38;5;208m' + f'tomogram not found at {tomo} - skipping' + '\033[0m')
-            continue
+            w_notes.append('\033[38;5;208m' + f'tomogram not found at {tomo} - skipping' + '\033[0m')
+            return w_notes, w_adds, w_tasks, w_coords
 
         tomo_mrc_name = os.path.basename(tomo).split("__")[0] + ".mrc"
 
@@ -836,9 +1164,10 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
         # tomograms land on a common grid. When native ~= target (<5%) the box is kept as-is.
         native_bs = int(box_size)
         if not coordinates:
-            native_apix = float(mrcfile.open(tomo, header_only=True).voxel_size.x)
+            with mrcfile.open(tomo, header_only=True) as _mrc:
+                native_apix = float(_mrc.voxel_size.x)
             if native_apix <= 0 or abs(native_apix - 1.0) < 1e-6:
-                notes.append('\033[38;5;208m' + f'{os.path.basename(tomo)}: header pixel size {native_apix} A/px looks unset; treating as --apix {apix:.2f} (no rescale)' + '\033[0m')
+                w_notes.append('\033[38;5;208m' + f'{os.path.basename(tomo)}: header pixel size {native_apix} A/px looks unset; treating as --apix {apix:.2f} (no rescale)' + '\033[0m')
                 native_apix = apix
             if abs(native_apix / apix - 1.0) >= 0.05:
                 native_bs = int(round(box_size * apix / native_apix))
@@ -848,18 +1177,16 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
                 if f.title not in features:
                     continue
                 box_coordinates = [(z, box[0], box[1]) for z in f.boxes for box in f.boxes[z]]
-                disp.add(f.title, len(box_coordinates), [])
+                w_adds.append((f.title, len(box_coordinates), ()))
                 for z, k, l in box_coordinates:
-                    coord_rows[f.title].append({
+                    w_coords.append((f.title, {
                         'rlnCoordinateZ': z,
                         'rlnCoordinateY': l,
                         'rlnCoordinateX': k,
                         'rlnMicrographName': tomo_mrc_name,
-                    })
-            continue
+                    }))
+            return w_notes, w_adds, w_tasks, w_coords
 
-        # flavours are found lazily: only once this tomogram actually contributes boxes
-        # for a requested feature (many .scns won't have the feature of interest).
         flavour_paths = None
 
         for f in se_frame.features:
@@ -875,14 +1202,14 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
                 flavour_paths = {se_scnt.DEFAULT_ANNOTATED_FLAVOUR: tomo}
                 if easymode:
                     flavour_paths.update(_find_flavours(tomo))
-            disp.add(f.title, len(box_coordinates), flavour_paths.keys())
+            w_adds.append((f.title, len(box_coordinates), tuple(flavour_paths.keys())))
             group = MERGED_GROUP if merge else f.title
             for z, x, y in box_coordinates:
                 if z in f.slices and f.slices[z] is not None:
                     label_patch = se_scnt.extract_label(f, z, y, x, native_bs)
                 else:
                     label_patch = None
-                tasks.append({
+                w_tasks.append({
                     'group': group,
                     'hash': se_scnt.make_id(tomo_stem, f.title, z, y, x),
                     'flavour_paths': dict(flavour_paths),
@@ -904,7 +1231,27 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
                         'aisFeatureName': f.title,
                     },
                 })
-                feature_box_count[f.title] += 1
+
+        return w_notes, w_adds, w_tasks, w_coords
+
+    n_scan_threads = max(1, min(16, len(annotated_tomograms)))   # IO-bound, so not tied to cpu_count
+    scanned = [None] * len(annotated_tomograms)
+    with ThreadPoolExecutor(max_workers=n_scan_threads) as pool:
+        futures = {pool.submit(_scan_one, a): i for i, a in enumerate(annotated_tomograms)}
+        for fut in as_completed(futures):
+            scanned[futures[fut]] = fut.result()
+            disp.start_tomo()
+            for title, nboxes, flavours in scanned[futures[fut]][1]:
+                disp.add(title, nboxes, flavours)
+
+    # merged in input order, so the .scnt/.star contents don't depend on thread scheduling
+    for w_notes, w_adds, w_tasks, w_coords in scanned:
+        notes.extend(w_notes)
+        tasks.extend(w_tasks)
+        for title, nboxes, _ in w_adds:
+            feature_box_count[title] += nboxes
+        for title, row in w_coords:
+            coord_rows[title].append(row)
 
     disp.finish()
     for note in notes:
@@ -972,7 +1319,10 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
         groups = [(f, f, f, [f], [t for t in tasks if t['group'] == f]) for f in features]
 
     try:
-        print('\033[96m' + f'extracting {len(tasks)} boxes using {n_proc} process(es)...' + '\033[0m')
+        # each box is written once per flavour (x_main, x_iso, ...) - report the true image count
+        n_images = sum(len(t['flavour_paths']) for t in tasks)
+        _imgs = f" ({n_images} incl. flavours)" if n_images != len(tasks) else ""
+        print('\033[96m' + f'extracting {len(tasks)} boxes{_imgs} using {n_proc} process(es)...' + '\033[0m')
         pool = None if n_proc == 1 else multiprocessing.Pool(
             processes=n_proc, initializer=se_scnt.init_extract_worker, initargs=(ctx,))
         if pool is None:

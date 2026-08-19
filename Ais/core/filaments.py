@@ -9,6 +9,7 @@ from collections import deque
 import pandas as pd
 import json
 import starfile
+from Ais.core.util import add_particle_ids
 
 
 def prune_skeleton(skel, min_branch_length=5):
@@ -344,7 +345,7 @@ def pick_filament(mrcpath, out_path, threshold, spacing_nm, size_nm, binning, ma
     volume = volume.astype(np.float32)
     volume = bin_volume(volume, binning)
     pixel_size *= binning
-    margin = int(margin / pixel_size)
+    margin = int(margin) // int(binning)   # -m is original px (as in blob mode); coords here are binned
 
     labels, _ = label(volume > threshold)
     group_sizes = np.bincount(labels.ravel())
@@ -369,6 +370,7 @@ def pick_filament(mrcpath, out_path, threshold, spacing_nm, size_nm, binning, ma
     df['rlnCoordinateY'] *= binning
     df['rlnCoordinateZ'] *= binning
     df['rlnMicrographName'] = os.path.basename(mrcpath).split("__")[0]+".mrc"
+    add_particle_ids(df, mrcpath)
     starfile.write({'particles': df}, out_path, overwrite=True)
 
     return len(df), len(filaments)

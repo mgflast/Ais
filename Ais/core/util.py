@@ -10,10 +10,57 @@ from scipy.ndimage import label, distance_transform_edt
 from skimage.feature import peak_local_max
 import starfile
 import pandas as pd
+from hashlib import blake2b
 timer = 0.0
+
+PARTICLE_ID_LENGTH = 10   # 5.95 bits per character, so ~59 bits of id (see add_particle_ids)
+_ID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'   # letters first
+
+
+def _particle_id(key):
+    # 62 symbols (a-z, A-Z, 0-9) = 5.954 bits per character. Adding '-_' for base64's 64 symbols,
+    # or '.+' on top of that, would add 0.6 / 1.2 bits across the whole id - never a shorter id, so
+    # it stays plain alphanumeric. The first character comes from the top digest byte, which the
+    # other 13 don't reach, and is always a letter: an id can't be read back as a number.
+    d = blake2b(key.encode('utf-8'), digest_size=16).digest()
+    n = int.from_bytes(d, 'big')
+    out = [_ID_ALPHABET[d[0] % 52]]
+    for _ in range(PARTICLE_ID_LENGTH - 1):
+        n, r = divmod(n, 62)
+        out.append(_ID_ALPHABET[r])
+    return ''.join(out)
+
+
+def add_particle_ids(df, volume_path, column='aisParticleID'):
+    """Give every picked particle a unique id: a base64url blake2b hash of the segmented volume's
+    filename - which carries both the tomogram and the picked feature - plus the particle's
+    coordinates and, where present, its Euler angles.
+
+    Content-derived rather than random, so re-picking a tomogram reproduces the same ids instead of
+    renumbering everything, and two particles can only share an id if they are the same feature at
+    the same position in the same tomogram. Including the volume filename is what keeps two features
+    picked from one tomogram apart when they land on the same voxel.
+
+    10 characters is ~59 bits: an expected 7e-7 colliding pairs in a 1M particle set, 7e-5 at 10M,
+    2e-3 at 50M. Deliberately not longer - a shared id is about as harmful as the duplicate
+    particles a set that size already holds. 8 characters would be too short (a 1-in-370 collision
+    at 1M, and 1-in-4 at 10M)."""
+    tag = os.path.basename(volume_path)
+    fields = ('rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ',
+              'rlnAngleRot', 'rlnAngleTilt', 'rlnAnglePsi')
+    vals = [df[f].to_numpy(dtype=float) if f in df.columns else None for f in fields]
+    ids = []
+    for i in range(len(df)):
+        key = tag + '|' + '|'.join('' if v is None else f'{v[i]:.4f}' for v in vals)
+        ids.append(_particle_id(key))
+    df[column] = pd.Series(ids, index=df.index, dtype=object)
+    return df
 
 def generate_thumbnail(data, overlay, colour):
     data = np.squeeze(data)
+    if data.ndim == 3:                    # slab (Z, H, W) from a 2.5D/3D model -> centre slice (matches the 2D overlay)
+        data = data[data.shape[0] // 2]
+    overlay = np.squeeze(overlay)
     s = min(data.shape)
     sqdata = data[:s, :s].astype(np.float32)
     overlay = overlay[:s, :s]
@@ -212,6 +259,15 @@ def pick_particles(mrcpath="", threshold=128, margin=16, min_spacing=10.0, min_s
         for c, s, o in zip(coordinates, scores, orientations):
             particles.append(Particle(c, s, o))
 
+    # margin is in original px; binning already scaled it (line above), so it is applied here in the
+    # binned frame the coordinates live in - e.g. -m 16 with -b 4 excludes 4 binned px = 16 original px.
+    if margin > 0:
+        mz, my, mx = binary_vol.shape
+        particles = [p for p in particles
+                     if margin <= p.coordinate[0] < mz - margin
+                     and margin <= p.coordinate[1] < my - margin
+                     and margin <= p.coordinate[2] < mx - margin]
+
     particles.sort(key=lambda x: x.score, reverse=True)
     coordinates = [p.coordinate for p in particles]
     scores = [p.score for p in particles]
@@ -239,6 +295,7 @@ def pick_particles(mrcpath="", threshold=128, margin=16, min_spacing=10.0, min_s
                 rot, tilt, psi = orientations[i]
                 row += [rot, tilt, psi]
             df.loc[len(df)] = row
+        add_particle_ids(df, mrcpath)
         starfile.write({'particles': df}, out_path, overwrite=True)
         if process:
             process.set_progress(0.99)

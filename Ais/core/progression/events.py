@@ -189,3 +189,10 @@ def pop_level_up() -> Optional[LevelUp]:
 def peek_pending() -> int:
     with _queue_lock:
         return len(_queue)
+
+
+def clear_pending() -> None:
+    """Discard queued level-ups without rendering them. Used when party mode is turned ON so a
+    backlog accumulated while it was off doesn't fire a burst of toasts one after another."""
+    with _queue_lock:
+        _queue.clear()

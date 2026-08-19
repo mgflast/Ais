@@ -11,7 +11,7 @@ uniform vec3 origin;
 uniform vec3 particlePosition;
 void main()
 {
-    gl_Position = vpMat * vec4(xyz * particleSize + (particlePosition + 5) * pixelSize - origin.xyz * pixelSize, 1.0);
+    gl_Position = vpMat * vec4(xyz * particleSize + (particlePosition) * pixelSize - origin.xyz * pixelSize, 1.0);
 }
 
 #fragment
