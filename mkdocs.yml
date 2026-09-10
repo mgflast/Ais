@@ -14,7 +14,7 @@ nav:
           - "4️⃣ Using a model": guide/using_a_model.md
        - "<b>Tutorials</b>":
           - "1️⃣ Quick start": tutorials/quick_start.md
-          - "2️⃣ Microtubule inner proteins": tutorials/microtubule_inner_proteins.md
+          - "2️⃣ Chloroplasts (EMPIAR-11830)": tutorials/chloroplasts.md
        - "<b>Additional software features</b>":
           - "🔴 Filters & display": features/filters.md
           - "🟠 Model-assisted annotation": features/model_assisted_annotation.md
