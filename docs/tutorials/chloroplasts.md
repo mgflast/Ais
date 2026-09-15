@@ -1,5 +1,8 @@
 # Chloroplasts (EMPIAR-11830)
 
+!!! warning "Work in progress"
+    This tutorial is still being written. Some sections are incomplete, and details may change.
+
 In this tutorial we will prepare a network to segment chloroplasts in <i>C. reinhardtii</i> tomograms, using data from [EMPIAR-11830](https://www.ebi.ac.uk/empiar/EMPIAR-11830/). We assume you know the basics of training in Ais (if not, see the [quick start](quick_start.md) tutorial) and demonstrate some more involved steps that help you get to a good network. We will also do most steps (label extraction, training, inference) from the command line interface instead of the GUI - the only thing you _need_ the GUI for is annotation, and all the rest is easier via the CLI.
 
 ## 1. Downloading the data
@@ -56,6 +59,7 @@ In the command line interface, you can use `ais extract` to extract the training
 ais extract --features Chloroplast --data_directory tomograms/ --output_directory . --box-size 128 --box-depth 1 --apix 40.0
 ```
 Output:
+
 ```
 scanning 5 annotated tomograms for 1 features...
 scanning tomograms: 100%|██████████████████████████████████████████████████████████████████████████| 5/5 [00:00<00:00, 10.52tomo/s]
@@ -66,13 +70,13 @@ extracting Chloroplast: 100%|█████████████████
 Chloroplast: 39 training boxes - saving as 128x128x1_40.00Apx_Chloroplast.scnt
 ```
 
-If you want to use exactly the training data we prepared, you can download the resulting file: [128x128x1_40.00Apx_Chloroplast.scnt](../res/128x128x1_40.00Apx_Chloroplast.scnt){: download } (5 MB)
-
+If you want to use exactly the training data we prepared, you can download the resulting file: [128x128x1_40.00Apx_Chloroplast.scnt](../res/128x128x1_40.00Apx_Chloroplast.scnt){: download="128x128x1_40.00Apx_Chloroplast.scnt" } (5 MB).
 
 ### 2.3 Training the model
 Training via the command line with `ais train` is also a bit more versatile and powerful than doing it in the GUI. Although we normally use `VGGNet M` for a quick model with little training data, for this training dataset we found that `UNet M` worked much better. Generally if you're not sure which network to use, we would recommend training multiple different architectures and testing which is best in the GUI. The main thing we're looking at now: inference in the GUI should be fast, because we want to use the model to help us annotate more training data, and somewhat accurate - but it doesn't have to be perfect. If your version of Ais lacks `UNet M`, you can use `UNet L` or `VGGNet M`; run `ais train -models` to see which architectures are available.
 
 Use the command below to train a network. Note the `-gpu 0,1,2,3` argument - if you have more or fewer GPUs, adapt the list of numbers to your case. With four A100 GPUs (which is total overkill for this training run, by the way; a simple laptop GPU would have also worked) the training completed in 90 seconds.
+
 ```
 ais train -a 'UNet M' -t 128x128x1_40.00Apx_Chloroplast.scnt -gpu 0,1,2,3 -name Chloroplast -b 8 -augment -e 70
 ```
@@ -86,7 +90,7 @@ Testing this model on some unseen tomograms, we can see that it already produces
 
 ## 3. Training a good model to segment all data
 ### 3.1 Creating a much larger training dataset
-The remaining tomograms will have mostly finished downloading by now. In general it is best to sample training data in many different tomograms, rather than sampling a lot in only a few tomograms. So with the preliminary model in place, we'll open up 20 more tomograms and add more annotations in each of them. We specifically pay mind to the regions where our preliminary model's output is not so good, and use [model assisted annotation](../features/model_assisted_annotation.md) so that we don't have to draw everything from scratch.
+The remaining tomograms will have mostly finished downloading by now. In general it is best to sample training data in many different tomograms, rather than sampling a lot in only a few tomograms. So with the preliminary model in place, we'll open up 20 more tomograms and add more annotations in each of them. We specifically pay mind to the regions where our preliminary model's output is not so good, and use [model-assisted annotation](../features/model_assisted_annotation.md) so that we don't have to draw everything from scratch.
 
 After about 30 minutes, we had annotations in place for 25 tomograms. You can download our annotations [here](https://github.com/mgflast/Ais/releases/tag/tutorial-data), as 25 separate `.scnt` files. Because `.scnt` files are softlinked to the corresponding `.mrc` files, you may have to fix a missing link when you open these files in Ais. To do so, open the 'File manager' (`Settings > File manager > Open file manager`) and use the Find & Replace tool to edit the `.mrc` file path.
 
@@ -101,6 +105,7 @@ Using your own annotations or ours, extract the updated training data. Now that 
 ais extract --features Chloroplast --data_directory tomograms/ --output_directory . --box-size 128 --box-depth 16 --apix 40.0
 ```
 Output:
+
 ```
 scanning 25 annotated tomograms for 1 features...
 scanning tomograms: 100%|████████████████████████████████████████████████████████████████████████| 25/25 [00:00<00:00, 55.63tomo/s]
@@ -110,18 +115,12 @@ extracting 266 boxes using 16 process(es)...
 extracting Chloroplast: 100%|████████████████████████████████████████████████████████████████████| 266/266 [00:36<00:00,  7.27box/s]
 Chloroplast: 266 training boxes - saving as 128x128x16_40.00Apx_Chloroplast.scnt
 ```
+
 ### 3.2 Training a 3D network
-There are no major differences between 2D and 2.5D networks, but true 3D networks do use a different architecture. In Ais, 3D architectures have the tag '3d' in their name; currently, you'll find `ezm-3d-M`, `ezm-3d-M-bxe`, and `ezm-3d-L`. You can think of these as the counterparts to the `UNet` or `VGGNet` sets of networks, with `M` a 19.6 million parameter network and `L` 31.0 million parameters and the largest receptive field for a 3D network. 
+There are no major differences between 2D and 2.5D networks, but true 3D networks do use a different architecture. In Ais, 3D architectures have the tag '3d' in their name; currently, you'll find `ezm-3d-M`, `ezm-3d-M-bxe`, and `ezm-3d-L`. You can think of these as the counterparts to the `UNet` or `VGGNet` sets of networks, with `M` a 19.6 million parameter network and `L` 31.0 million parameters and the largest receptive field for a 3D network.
 
-Let's try to train a 3D network to segment Chloroplasts using the training data that we extracted with `--box-depth 16`:
+Let's try to train a 3D network to segment chloroplasts using the training data that we extracted with `--box-depth 16`:
+
 ```
-ais train `ezm-3d-L` -t 128x128x16_40.00Apx_Chloroplast.scnt -gpu 0,1,2,3 -e 100 -augment -c 8
+ais train -a 'ezm-3d-L' -t 128x128x16_40.00Apx_Chloroplast.scnt -gpu 0,1,2,3 -e 100 -augment -c 8
 ```
-
-
-
-
-
-
-
-
