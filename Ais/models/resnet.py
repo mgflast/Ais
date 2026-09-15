@@ -4,7 +4,7 @@ from tensorflow.keras.optimizers import Adam
 from .losses import masked_bce
 
 title = "ResNet"
-include = True
+include = False
 
 def create(input_shape):
     inputs = Input(input_shape)

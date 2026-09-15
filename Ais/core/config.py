@@ -1,4 +1,4 @@
-import traceback
+﻿import traceback
 import dill as pickle
 import os
 from datetime import datetime
@@ -13,7 +13,7 @@ glfw_initialized = False
 
 root = os.path.dirname(os.path.dirname(__file__))
 app_name = "Ais"
-version = "1.2.26"
+version = "1.2.36"
 license = "GNU GPL v3"
 log_path = os.path.join(os.path.expanduser("~"), ".Ais", "Ais.log")
 settings_path = os.path.join(os.path.expanduser("~"), ".Ais", "settings.txt")
@@ -121,8 +121,7 @@ def parse_settings():
             sdict = json.load(f)
     except Exception as e:
         shutil.copy(os.path.join(root, "core", "settings.txt"), settings_path)
-        parse_settings()
-        return
+        return parse_settings()
 
     # Read settings - if any parameters are missing, insert them.
     with open(os.path.join(root, "core", "settings.txt"), 'r') as f:

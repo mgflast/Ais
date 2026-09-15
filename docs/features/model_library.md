@@ -3,14 +3,13 @@
 Ais comes with a _network library_ of multiple different neural network architectures. These differ in depth, number of parameters, dimensionality (2D, 2.5D, or 3D compatible), and in design — VGG-style stacks, UNets, and one GAN. When you're training a new network, it is often useful to start with a small net and only switch to a larger one when you have more training data to support it. This is because the size of the training data needs to be appropriate for the size of the network - a 100 million parameter network trained with just 10 samples will not be very useful.
 
 ## Available architectures
-The network library currently contains 15 different architectures. They can be split into a couple of groups:
+The network library currently contains 14 different architectures. They can be split into a couple of groups:
 
 - **VGGNet S / M / L / X** — VGG-style stacks of convolution and pooling layers, in increasing size. VGGNet M is the default, and a good first choice for most features.
 - **UNet S / L** — standard UNets.
 - **Eman2, InceptionNet, ResNet** — a few classic designs, originally included for comparison to other work. These can be interesting to play around with, but we do not recommend using them generally.
 - **ezm-2d-dice, ezm-2d-bxe** — the easymode backbone: deeper and wider UNets, trained with a masked, combined dice and binary cross-entropy loss. The two variants differ in the weighting of the loss components. 
 - **ezm-3d, ezm-3d-bxe** — the easymode 3D networks — also UNets, but built from 3D convolutions.
-- **ezm-3d-filament** — a special case of the easymode 3D networks, used for filaments. Rather than directly predicting labels, this architecture predicts a distance map and then uses a fixed-weight layer to draw fixed shape cylindrical labels. This network can output genuine 3D filament shapes, even when trained with 2D annotated slices.
 - **Pix2pix** — a generative adversarial network, which is architecturally the most unique.
 
 ## 2D, 2.5D, and 3D

@@ -98,6 +98,6 @@ def create(input_shape, output_dimensionality=1):
     model = Model(inputs=[inputs], outputs=[output])
 
     # Compile the model with a suitable optimizer and loss function
-    model.compile(optimizer=Adam(learning_rate=5e-5), loss=masked_bce_dice(bce_weight=0.1, dice_weight=1.0))
+    model.compile(optimizer=Adam(learning_rate=5e-5), loss=masked_bce_dice(bce_weight=1.0, dice_weight=1.0))
 
     return model

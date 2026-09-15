@@ -5,7 +5,7 @@ from tensorflow.image import resize
 from .losses import masked_bce
 
 title = "Eman2"
-include = True
+include = False
 
 def create(input_shape):
     inputs = Input(input_shape)

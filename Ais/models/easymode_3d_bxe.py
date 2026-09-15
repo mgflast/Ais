@@ -5,7 +5,7 @@ from tensorflow.keras.optimizers import Adam
 from .losses import masked_bce_dice
 
 
-title = "ezm-3d-bxe"
+title = "ezm-3d-M-bxe"
 include = True
 dimensionality = 3
 

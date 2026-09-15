@@ -4,7 +4,7 @@ from tensorflow.keras.optimizers import Adam
 from .losses import masked_bce
 
 title = "InceptionNet"
-include = True
+include = False
 
 def inception_module(inputs, filters=64):
     t1 = Conv2D(filters, (1, 1), padding='same', activation='relu')(inputs)

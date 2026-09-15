@@ -5,7 +5,7 @@ from tensorflow.keras.optimizers import Adam
 from .losses import masked_bce_dice
 
 
-title = "ezm-3d"
+title = "ezm-3d-M"
 include = True
 dimensionality = 3
 
@@ -74,5 +74,5 @@ def create(input_shape, output_dimensionality=1):
     # slab output + slab label (annotated slice at its jittered Z-position, rest = ignore): the
     # masked loss supervises only that slice, and Z-jitter spreads it across all output positions.
     model.compile(optimizer=Adam(learning_rate=5e-5),
-                  loss=masked_bce_dice(bce_weight=0.3, dice_weight=0.7))
+                  loss=masked_bce_dice(bce_weight=1.0, dice_weight=1.0))
     return model

@@ -117,7 +117,9 @@ def main():
     train_parser.add_argument('-c', '--copies', required=False, type=int, default=8, help="Number of augmented versions of the input images to include in the training data (all samples in different orientations). Default 8 (which would be the eight permutations of 90 degree rotations + horizontal flips; An argument >8 would include randomly rotated versions of the input images). If training data is 2.5D, augmentations 8 - 16 also include a flip in Z.")
     train_parser.add_argument('-r', '--rate', required=False, type=float, default=1e-3,help="Learning rate (default 1e-3)")
     train_parser.add_argument('-augment', required=False, action='store_true', help="If set, use extra scaling, contrast, brightness, and blurring augmentations.")
-    train_parser.add_argument('--filament', required=False, type=float, default=None, help="Filament tube diameter (px). Works for 3D networks only.")
+    train_parser.add_argument('--filament', required=False, type=float, default=None, help="Filament diameter (px). If set, training labels are rewritten as soft tubes of this diameter centred on the skeleton of the annotation - only the drawn centerline matters then, not the drawn width.")
+    train_parser.add_argument('--cache', required=False, action='store_true', help="Cache training samples in RAM instead of re-reading them from disk every epoch. Sets larger than 24 GB are not cached.")
+    train_parser.add_argument('--xla', required=False, action='store_true', help="XLA-compile the network for faster training steps (typically 1.3-2x). The first step takes extra time while the network compiles.")
     train_parser.add_argument('-name', '--model_name', required=False, type=str, default="Unnamed model", help="Model name. File will be saved as output_directory/{name}.scnm")
     train_parser.add_argument('-models', '--model_architectures', required=False, action='store_true', help='List available model architectures.')
 
@@ -218,7 +220,9 @@ def main():
                                    rate=args.rate,
                                    name=args.model_name,
                                    extra_augmentations=args.augment,
-                                   filament=args.filament)
+                                   filament=args.filament,
+                                   xla=args.xla or None,
+                                   cache=args.cache or None)
         elif args.command == 'extract':
             aiscli.extract_training_data(features=args.features,
                                          data_directory=args.data_directory,

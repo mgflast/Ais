@@ -61,7 +61,7 @@ ais train -t <training_data...> -ou <output_directory> -gpu <gpu_ids> -a <archit
 | `-c`, `--copies` | Number of augmented copies of each input image served per epoch. Augmentations include rotations (0, 90, 180, 270 degrees) (for `-c 1` to `-c 4`), flipped and rotated copies (`-c 5` to `-c 8`), and copies randomly rotated around the Z axis (`-c >8`). For 2.5D or 3D data, `-c 9` to `-c 16` additionally include a rotation around the X axis (and not the random rotation around Z). |
 | `-r`, `--rate` | Learning rate. Default 1e-3. |
 | `-m`, `--model_path` | Continue training from a saved `.scnm`. Overrides `-a`, because the saved weights only work for the architecture they represent. |
-| `--filament` | Filament tube diameter (px). For the 3D filament architectures (e.g. `ezm-3d-filament`) only. |
+| `--filament` | Filament diameter (px). If set, training labels are rewritten as soft tubes of this diameter centred on the skeleton of the annotation — only the drawn centerline matters then, not the drawn width. |
 | `-augment` | Add extra augmentations (see the note below). |
 | `-models`, `--model_architectures` | List the available architectures and their `-a` indices, then exit. |
 

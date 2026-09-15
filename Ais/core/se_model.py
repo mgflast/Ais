@@ -38,12 +38,16 @@ class SEModelDataLoader:
     P_AUG_SCALE = 0.0
     P_AUG_BLUR = 0.1
     P_AUG_GAMMA = 0.0
+    # threads, not processes: workers share the training set's box cache, and numpy/scipy
+    # release the GIL. 1 = the exact old single-generator pipeline.
+    WORKERS = min(8, os.cpu_count() or 8)
 
-    def __init__(self, training_dataset_path, batch_size, validation_split, extra_augmentations=False):
+    def __init__(self, training_dataset_path, batch_size, validation_split, extra_augmentations=False, cache=False):
         self.path = training_dataset_path
         self.batch_size = batch_size
         self.validation_split = validation_split
         self.extra_augmentations = extra_augmentations
+        self.cache = cache
         self.apix = -1.0
 
         self.dataset = None
@@ -64,7 +68,7 @@ class SEModelDataLoader:
         return self.n_samples
 
     def load_data(self):
-        self.dataset = se_scnt.open_training_set(self.path)
+        self.dataset = se_scnt.open_training_set(self.path, cache=self.cache)
         self.apix = self.dataset.apix
         self.normalization = getattr(self.dataset, "normalization", None)
         self.n_samples = self.dataset.n_samples
@@ -211,15 +215,22 @@ class SEModelDataLoader:
         x /= np.std(x) + 1e-7
         return x, y
 
-    def training_generator(self):
+    def training_generator(self, shard=0, n_shards=1):
+        shard, n_shards = int(shard), int(n_shards)     # from_generator args arrive as np scalars
+        order = np.array(self.idx_training_all)          # per-shard copies: shuffling shared
+        positives = np.array(self.idx_training_positive)  # arrays from N threads races
+        k = 0
         while True:
-            np.random.shuffle(self.idx_training_all)
-            np.random.shuffle(self.idx_training_positive)
-            for j in range(len(self.idx_training_all)):
-                if j % self.batch_size == 0:  # at least one labelled sample per batch
-                    index = self.idx_training_positive[(j // self.batch_size) % len(self.idx_training_positive)]
+            np.random.shuffle(order)
+            np.random.shuffle(positives)
+            for j in range(shard, len(order), n_shards):
+                # one labelled sample per batch_size yields (counted on yields, not indices,
+                # so the ratio survives sharding; statistical, not per-batch, when n_shards > 1)
+                if k % self.batch_size == 0 and len(positives):
+                    index = positives[(k // self.batch_size) % len(positives)]
                 else:
-                    index = self.idx_training_all[j]
+                    index = order[j]
+                k += 1
 
                 x, y = self.get_sample(index, training=True)
                 x, y = self.preprocess(x, y)
@@ -250,7 +261,15 @@ class SEModelDataLoader:
                 self.batch_size = self.batch_size // 2
 
             n_steps = len(self.idx_training_all) // self.batch_size
-            dataset = tf.data.Dataset.from_generator(self.training_generator, output_signature=(tf.TensorSpec(shape=(self.box_shape, self.box_shape, self.box_depth), dtype=tf.float32), self._y_signature())).batch(batch_size=self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+            signature = (tf.TensorSpec(shape=(self.box_shape, self.box_shape, self.box_depth), dtype=tf.float32), self._y_signature())
+            w = SEModelDataLoader.WORKERS
+            if w <= 1:
+                dataset = tf.data.Dataset.from_generator(self.training_generator, output_signature=signature)
+            else:
+                dataset = tf.data.Dataset.range(w).interleave(
+                    lambda i: tf.data.Dataset.from_generator(self.training_generator, output_signature=signature, args=(i, w)),
+                    cycle_length=w, num_parallel_calls=w, deterministic=False)
+            dataset = dataset.batch(batch_size=self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
         return dataset, n_steps
 
@@ -259,7 +278,7 @@ class SEModel:
     idgen = count(0)
     AVAILABLE_MODELS = []
     MODELS = dict()
-    MODEL_MODULES = dict()   # title -> arch module, so compile() can reach arch-level globals
+    MODEL_MODULES = dict()   # title -> arch module, for arch-level hooks (e.g. a custom load_model)
     MODELS_LOADED = False
     # older .scnm files store the architecture as an index into AVAILABLE_MODELS; this is that
     # list as it was ordered then, so those indices keep resolving after library changes. New
@@ -319,7 +338,7 @@ class SEModel:
         self.normalization = None  # None = legacy per-box/per-slice; else global
         self.z_jitter = 0          # slab models: trained Z-position jitter (= reliable output half-range*2)
         self.tta = 1               # per-model test-time augmentation multiplicity (1-8)
-        self.filament_diameter = None   # if set (px), `ais train --filament D` sizes the arch's fixed tube-render kernel
+        self.filament_diameter = None   # if set (px), `ais train --filament D` rewrites labels as soft D-diameter tubes (se_scnt.soften_labels)
         self.data = None
         if not no_glfw:
             self.texture = Texture(format="r32f")
@@ -359,7 +378,7 @@ class SEModel:
                 'compiled': self.compiled,
                 'box_size': self.box_size,
                 'model_depth': self.model_depth,
-                'filament_diameter': self.filament_diameter,   # tube-render diameter (px); sizes the fixed render kernel on rebuild
+                'filament_diameter': self.filament_diameter,   # label-softening tube diameter (px), see se_scnt.soften_labels
                 'model_enum': self.model_enum,
                 'arch': SEModel.AVAILABLE_MODELS[self.model_enum] if 0 <= self.model_enum < len(SEModel.AVAILABLE_MODELS) else None,
                 'epochs': self.epochs,
@@ -482,22 +501,27 @@ class SEModel:
         except Exception as e:
             print("Error loading model - see details below\n", e)
 
-    def train(self, rate=None, external_callbacks=None, extra_augmentations=False, strategy=None):
+    def train(self, rate=None, external_callbacks=None, extra_augmentations=False, strategy=None, xla=None, cache=None):
         if self.train_data_path:
+            xla = cfg.settings.get("TRAIN_XLA", False) if xla is None else xla
+            cache = cfg.settings.get("TRAIN_CACHE", False) if cache is None else cache
             # Model build/compile (incl. the inference->training rebuild) is deferred to _train
             # so it runs inside strategy.scope() in the worker thread that calls fit() - the only
             # place a MirroredStrategy actually distributes the fit.
-            process = BackgroundProcess(self._train, (rate, external_callbacks, extra_augmentations, strategy), name=f"{self.title} training")
+            process = BackgroundProcess(self._train, (rate, external_callbacks, extra_augmentations, strategy, xla, cache), name=f"{self.title} training")
             self.background_process_train = process
             self.inference_model = None
             process.start()
 
-    def _train(self, rate=None, external_callbacks=None, extra_augmentations=False, strategy=None, process=None):
+    def _train(self, rate=None, external_callbacks=None, extra_augmentations=False, strategy=None, xla=False, cache=False, process=None):
         try:
             start_time = time.time()
             validation_split = 0.0 if "VALIDATION_SPLIT" not in self.bcprms else self.bcprms["VALIDATION_SPLIT"]
 
-            loader = SEModelDataLoader(self.train_data_path, self.batch_size, validation_split, extra_augmentations=extra_augmentations)
+            loader = SEModelDataLoader(self.train_data_path, self.batch_size, validation_split, extra_augmentations=extra_augmentations, cache=cache)
+            if self.filament_diameter:
+                print(f"Applying filament prior: labels -> soft tubes of diameter {self.filament_diameter:g} px.")
+                loader.dataset.soften_labels(self.filament_diameter)
             self.model_depth = loader.box_depth
             self.apix = loader.apix
             self.normalization = loader.normalization
@@ -534,6 +558,9 @@ class SEModel:
                 learning_rate = rate if rate is not None else cfg.settings["LEARNING_RATE"]
                 self.model.optimizer.learning_rate.assign(learning_rate)
 
+                if xla:
+                    self.model.call = tf.function(self.model.call, jit_compile=True)
+
                 training_generator, training_steps = loader.as_generator(validation=False)
                 validation_generator, validation_steps = None, None
                 if validation_split != 0.0:
@@ -546,7 +573,14 @@ class SEModel:
                 if not external_callbacks is None:
                     callbacks += external_callbacks
 
-                self.model.fit(training_generator, steps_per_epoch=training_steps * self.n_copies, validation_data=validation_generator, validation_steps=validation_steps, epochs=self.epochs, validation_freq=1, callbacks=callbacks)
+                try:
+                    self.model.fit(training_generator, steps_per_epoch=training_steps * self.n_copies, validation_data=validation_generator, validation_steps=validation_steps, epochs=self.epochs, validation_freq=1, callbacks=callbacks)
+                finally:
+                    if xla:
+                        del self.model.call
+                        self.model.train_function = None
+                        self.model.test_function = None
+                        self.model.predict_function = None
             process.set_progress(1.0)
             print(f"{self.title} " + self.info + f" {time.time() - start_time:.1f} seconds of training.")
         except Exception as e:
@@ -558,18 +592,6 @@ class SEModel:
 
     def compile(self, box_size, box_depth=1):
         model_module_name = SEModel.AVAILABLE_MODELS[self.model_enum]
-        # Filament tube-render archs (ezm-3d-filament) build a fixed 'tube_render' dilation layer whose
-        # ball radius = D/2 bakes in the known filament diameter. That radius sets the layer's kernel SIZE,
-        # so it must be chosen before create() runs (set_weights can't reshape a kernel). Publish the
-        # --filament diameter (persisted in metadata) to the SELECTED arch's module; it defaults to the
-        # arch's own DEFAULT_DIAMETER_PX when unset, and is reset by create() so it can't leak.
-        if self.filament_diameter:
-            _tmod = SEModel.MODEL_MODULES.get(model_module_name)
-            if _tmod is not None and hasattr(_tmod, '_ACTIVE_DIAMETER_PX'):
-                _tmod._ACTIVE_DIAMETER_PX = float(self.filament_diameter)
-            else:
-                print(f"Warning: --filament {self.filament_diameter:g} ignored - '{model_module_name}' has no "
-                      f"tube-render kernel. Use a filament architecture (e.g. ezm-3d-filament).")
         self.model = SEModel.MODELS[model_module_name]((box_size, box_size, box_depth))
         # Re-compile with the arch's own loss/optimizer plus streaming precision/recall,
         # so they are printed per epoch during training (like easymode). Masked metrics
@@ -622,10 +644,10 @@ class SEModel:
     def update_info(self):
         validation_split_tag = "" if ("VALIDATION_SPLIT" not in self.bcprms or self.bcprms["VALIDATION_SPLIT"] == 0.0) else f"|{int(self.bcprms['VALIDATION_SPLIT']*100.0)}%"
         if self.compilation_mode == 'training':
-            self.info = SEModel.AVAILABLE_MODELS[self.model_enum] + f" ({self.n_parameters // 1e6:.1f} Mp, {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
+            self.info = SEModel.AVAILABLE_MODELS[self.model_enum] + f" ({self.n_parameters / 1e6:.1f} Mp, {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
             self.info_short = "(" + SEModel.AVAILABLE_MODELS[self.model_enum] + f", {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
         elif self.compilation_mode == 'inference':
-            self.info = SEModel.AVAILABLE_MODELS[self.model_enum] + f" ({self.n_parameters // 1e6:.1f} Mp, {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
+            self.info = SEModel.AVAILABLE_MODELS[self.model_enum] + f" ({self.n_parameters / 1e6:.1f} Mp, {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
             self.info_short = "(" + SEModel.AVAILABLE_MODELS[self.model_enum] + f", {self.box_size}-x{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
 
     def get_model_title(self):

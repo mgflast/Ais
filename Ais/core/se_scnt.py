@@ -46,7 +46,8 @@ FORMAT_VERSION = 1
 INPUT_PREFIX = "x_"
 LABEL_DIR = "y"
 DEFAULT_ANNOTATED_FLAVOUR = "x_main"
-
+CACHE_LIMIT_GB = 24.0
+AUGMENTATION_FLAVOURMIX = 0.5
 
 # --------------------------------------------------------------------------- #
 # box / label extraction (shared by the CLI and GUI extract code paths)
@@ -57,15 +58,6 @@ def make_id(tomo_stem, feature_name, z, y, x):
     flavour of the same box shares a filename and links by name."""
     key = f"{tomo_stem}_{feature_name}_{z}_{y}_{x}"
     return hashlib.md5(key.encode()).hexdigest()[:16]
-
-
-def _bin(arr, binning, anti_aliasing=True):
-    if binning == 1:
-        return arr
-    j, k, l = arr.shape
-    new_shape = [j, int(np.round(k / binning)), int(np.round(l / binning))]
-    return resize(arr, new_shape, anti_aliasing=anti_aliasing, preserve_range=True,
-                  order=1 if anti_aliasing else 0)
 
 
 def _scale_xy(arr, out_xy, anti_aliasing=True):
@@ -153,7 +145,7 @@ def extract_label(feature, z, y, x, box_size):
 
 
 def extract_feature_samples(tomo_stem, flavour_data, annotated_flavour,
-                            feature, box_size, box_depth, binning=1, is_negative=False,
+                            feature, box_size, box_depth, is_negative=False,
                             tomo_path=None, on_box=None):
     """Extract all boxes for one feature of one annotated tomogram.
 
@@ -180,7 +172,7 @@ def extract_feature_samples(tomo_stem, flavour_data, annotated_flavour,
             if data.shape != flavour_data[annotated_flavour].shape:
                 continue  # skip a flavour whose volume does not match the annotated one
             box, _ = extract_box(data, z, y, x, box_size, box_depth, n_slices)
-            inputs[flavour] = _bin(box, binning)
+            inputs[flavour] = box
 
         if is_negative or z not in feature.slices or feature.slices[z] is None:
             label = np.zeros((box_size, box_size), dtype=np.float32)
@@ -193,7 +185,6 @@ def extract_feature_samples(tomo_stem, flavour_data, annotated_flavour,
             label[-margin_per_side:, :] = 2
             label[:, :margin_per_side] = 2
             label[:, -margin_per_side:] = 2
-        label = _bin(label[None, :, :], binning, anti_aliasing=False)[0]
 
         h = make_id(tomo_stem, feature.title, z, y, x)
         samples.append({
@@ -425,7 +416,7 @@ def _normalize(arr):
     return arr
 
 
-def open_training_set(path):
+def open_training_set(path, cache=False):
     """Open a .scnt training set.
 
     `path` may be a single path (str) or a list/tuple of paths. Given several
@@ -437,15 +428,15 @@ def open_training_set(path):
         if len(paths) == 0:
             raise ValueError("open_training_set called with an empty list of paths.")
         if len(paths) == 1:
-            return _open_single_training_set(paths[0])
-        return PooledTrainingSet(paths)
-    return _open_single_training_set(path)
+            return _open_single_training_set(paths[0], cache)
+        return PooledTrainingSet(paths, cache)
+    return _open_single_training_set(path, cache)
 
 
-def _open_single_training_set(path):
+def _open_single_training_set(path, cache=False):
     """Open one .scnt file, auto-detecting the new (tar) or legacy (TIFF) format."""
     if tarfile.is_tarfile(path):
-        return ScntTrainingSet(path)
+        return ScntTrainingSet(path, cache=cache)
     return LegacyTiffTrainingSet(path)
 
 
@@ -454,8 +445,11 @@ class ScntTrainingSet:
     archive is extracted once to a managed temp directory for the lifetime of
     the object."""
 
-    def __init__(self, path):
+    def __init__(self, path, cache=False):
         self.path = path
+        self._cache = cache          # RAM cache of raw decoded boxes; mixing/crop/aug stay per access
+        self._input_cache = {}
+        self._label_cache = {}
         self._tmp = tempfile.mkdtemp(prefix='scnt_')
         with tarfile.open(path, 'r') as tar:
             tar.extractall(self._tmp)
@@ -515,6 +509,14 @@ class ScntTrainingSet:
         self.z_jitter = int(meta.get('z_jitter', 0))                     # extra Z-context for jitter
         self.box_depth = int(meta.get('box_depth', self.stored_depth))   # model depth (stored - jitter)
         self.box_shape = int(meta.get('box_size', self._read_label(self.hashes[0]).shape[0]))
+        if self._cache:
+            n_boxes = sum(len(v) for v in self._flavours_for.values())
+            gb = (n_boxes * self.stored_depth + self.n_samples) * self.box_shape ** 2 * 4 / 1e9
+            if gb > CACHE_LIMIT_GB:
+                self._cache = False
+                print(f"Not caching {os.path.basename(path)}: ~{gb:.2f} GB exceeds the {CACHE_LIMIT_GB:.0f} GB limit.")
+            else:
+                print(f"Caching {os.path.basename(path)} in RAM: {n_boxes} input + {self.n_samples} label boxes, ~{gb:.2f} GB.")
         self.apix = float(meta.get('apix', -1.0))
         if self.apix < 0:
             try:
@@ -527,9 +529,21 @@ class ScntTrainingSet:
         return os.path.join(self._tmp, flavour, h + '.mrc')
 
     def _read_input(self, h, flavour):
+        if self._cache:
+            vol = self._input_cache.get((flavour, h))
+            if vol is None:
+                vol = np.array(mrcfile.read(self._input_path(h, flavour)), dtype=np.float32)
+                self._input_cache[(flavour, h)] = vol
+            return vol
         return np.array(mrcfile.read(self._input_path(h, flavour)), dtype=np.float32)
 
     def _read_label(self, h):
+        if self._cache:
+            y = self._label_cache.get(h)
+            if y is None:
+                y = np.array(mrcfile.read(os.path.join(self._tmp, LABEL_DIR, h + '.mrc')), dtype=np.float32)
+                self._label_cache[h] = y
+            return y
         return np.array(mrcfile.read(os.path.join(self._tmp, LABEL_DIR, h + '.mrc')), dtype=np.float32)
 
     def soften_labels(self, diameter):
@@ -545,6 +559,7 @@ class ScntTrainingSet:
             soft = _soft_tube_label(np.array(mrcfile.read(p), dtype=np.float32), sigma)
             with mrcfile.new(p, overwrite=True) as m:
                 m.set_data(np.ascontiguousarray(soft, dtype=np.float32))
+        self._label_cache.clear()
 
     def positive_indices(self):
         out = []
@@ -560,9 +575,7 @@ class ScntTrainingSet:
         # legacy: normalize each box before mixing; global: boxes are pre-normalized at extract
         prep = (lambda a: a) if self.normalization == NORM_GLOBAL_MAD else _normalize
         if training and len(available) > 1:
-            # 2/3 pure flavour (equal prob among available), 1/3 random-weight mixture;
-            # flavours treated equally (no annotated double-weight).
-            if random.random() < 2.0 / 3.0:
+            if random.random() < AUGMENTATION_FLAVOURMIX:
                 vol = prep(self._read_input(h, random.choice(available)))
             else:
                 fa, fb = random.sample(available, 2)
@@ -574,8 +587,8 @@ class ScntTrainingSet:
             flavour = self.annotated_flavour if self.annotated_flavour in available else available[0]
             vol = self._read_input(h, flavour)
 
-        x = np.transpose(vol, (1, 2, 0)).astype(np.float32)        # (H, W, D)
-        y = self._read_label(h)[:, :, None].astype(np.float32)      # (H, W, 1)
+        x = np.transpose(vol, (1, 2, 0)).astype(np.float32)        # (H, W, D); astype copy fences the cache
+        y = self._read_label(h)[:, :, None].astype(np.float32)      # (H, W, 1); from in-place edits downstream
         return x, y
 
     def source_records(self):
@@ -588,6 +601,8 @@ class ScntTrainingSet:
                 for f in self.input_flavours}
 
     def close(self):
+        self._input_cache.clear()
+        self._label_cache.clear()
         if self._tmp and os.path.isdir(self._tmp):
             shutil.rmtree(self._tmp, ignore_errors=True)
             self._tmp = None
@@ -611,9 +626,9 @@ class PooledTrainingSet:
     different input flavours - the pooled input_flavours is just their union, for
     reporting."""
 
-    def __init__(self, paths):
+    def __init__(self, paths, cache=False):
         self.path = list(paths)
-        self.sets = [_open_single_training_set(p) for p in paths]
+        self.sets = [_open_single_training_set(p, cache) for p in paths]
 
         box_shapes = {s.box_shape for s in self.sets}
         box_depths = {s.box_depth for s in self.sets}

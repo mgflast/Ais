@@ -1,4 +1,4 @@
-import os, sys, time, math, shutil, multiprocessing, glob, itertools, glfw, mrcfile, json, random
+import os, sys, time, math, shutil, multiprocessing, glob, itertools, glfw, mrcfile, json, random, fnmatch
 from collections import Counter
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # suppress TF C++ INFO and WARNING before import
 from Ais.core.se_frame import SEFrame
@@ -597,7 +597,7 @@ def resolve_model_architecture(architecture):
     exit(1)
 
 
-def train_model(training_data, output_directory, architecture=None, epochs=50, batch_size=32, negatives=0.0, copies=4, model_path='', gpus="0", parallel=1, rate=1e-3, name="Unnamed model", extra_augmentations=False, filament=None):
+def train_model(training_data, output_directory, architecture=None, epochs=50, batch_size=32, negatives=0.0, copies=4, model_path='', gpus="0", parallel=1, rate=1e-3, name="Unnamed model", extra_augmentations=False, filament=None, xla=None, cache=None):
     import keras.callbacks
 
     architecture = resolve_model_architecture(architecture)
@@ -664,7 +664,7 @@ def train_model(training_data, output_directory, architecture=None, epochs=50, b
     # call did nothing for the off-thread fit, and on the -m path clear_session() ran inside
     # the scope and emptied TF's strategy stack -> IndexError on scope exit.
     strategy = tf.distribute.MirroredStrategy() if parallel else None
-    model.train(rate=rate, external_callbacks=[checkpoint_callback], extra_augmentations=extra_augmentations, strategy=strategy)
+    model.train(rate=rate, external_callbacks=[checkpoint_callback], extra_augmentations=extra_augmentations, strategy=strategy, xla=xla, cache=cache)
 
     while model.background_process_train.progress < 1.0:
         time.sleep(0.2)
@@ -1007,6 +1007,22 @@ def _find_flavours(tomo_path):
     if os.path.exists(iso):
         flavours['x_iso'] = iso
 
+    # raw: datasets/{dataset}/warp_tiltseries/reconstruction/{stem}.mrc; the dataset name
+    # isn't in the flat cryocare path - resolve it via the dataset_contents.json index
+    # (written by datasets/scan_dataset_contents.py).
+    index_path = os.path.join(base, 'datasets', 'dataset_contents.json')
+    if os.path.exists(index_path):
+        with open(index_path, 'r') as jf:
+            dataset_tomo_map = json.load(jf)
+        for dataset, tomos in dataset_tomo_map.items():
+            if dataset.startswith('_'):
+                continue
+            if stem + '.mrc' in tomos:
+                raw = os.path.join(base, 'datasets', dataset, 'warp_tiltseries', 'reconstruction', stem + '.mrc')
+                if os.path.exists(raw):
+                    flavours['x_raw'] = raw
+                break
+
     return flavours
 
 
@@ -1110,6 +1126,7 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
     annotated_tomograms = glob.glob(os.path.join(data_directory, "*.scns"))
 
     excluded_files = []
+    excluded_patterns = []
     if exclude is not None:
         for e in exclude:
             if e.endswith('.txt'):
@@ -1117,9 +1134,17 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
                     excluded_files.extend([line.strip() for line in f if line.strip()])
             elif '*' in e:
                 excluded_files.extend(glob.glob(e))
+                p = os.path.basename(e)
+                root, ext = os.path.splitext(p)
+                if ext and '*' not in ext:
+                    p = root
+                excluded_patterns.append(p)
             else:
                 excluded_files.append(e)
     excluded_files = [os.path.basename(os.path.splitext(f)[0]) for f in excluded_files]
+
+    def _is_excluded(stem):
+        return stem in excluded_files or any(fnmatch.fnmatch(stem, p) for p in excluded_patterns)
 
     print(f'scanning {len(annotated_tomograms)} annotated tomograms for {len(features)} features...')
 
@@ -1133,7 +1158,7 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
     def _scan_one(annotation):
         w_notes, w_adds, w_tasks, w_coords = [], [], [], []
         stem = os.path.splitext(os.path.basename(annotation))[0]
-        if stem in excluded_files:
+        if _is_excluded(stem):
             w_notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)} - excluded' + '\033[0m')
             return w_notes, w_adds, w_tasks, w_coords
 
@@ -1149,7 +1174,7 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
             tomo = os.path.join(os.path.dirname(annotation), os.path.basename(se_frame.path.replace('\\','/')))
 
         tomo_stem = os.path.splitext(os.path.basename(tomo))[0]
-        if tomo_stem in excluded_files:
+        if _is_excluded(tomo_stem):
             w_notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)} - excluded' + '\033[0m')
             return w_notes, w_adds, w_tasks, w_coords
 
