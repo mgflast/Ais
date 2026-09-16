@@ -117,9 +117,9 @@ Chloroplast: 266 training boxes - saving as 128x128x16_40.00Apx_Chloroplast.scnt
 ```
 
 ### 3.2 Training a 3D network
-There are no major differences between 2D and 2.5D networks, but true 3D networks do use a different architecture. In Ais, 3D architectures have the tag '3d' in their name; currently, you'll find `ezm-3d-M`, `ezm-3d-M-bxe`, and `ezm-3d-L`. You can think of these as the counterparts to the `UNet` or `VGGNet` sets of networks, with `M` a 19.6 million parameter network and `L` 31.0 million parameters and the largest receptive field for a 3D network.
+There are no major differences between 2D and 2.5D networks, but true 3D networks do use a different architecture. In Ais, 3D architectures have the tag '3d' in their name; currently, you'll find `ezm-3d-M` and `ezm-3d-L`. You can think of these as the counterparts to the `UNet` or `VGGNet` sets of networks, with `M` a 19.6 million parameter network and `L` 31.0 million parameters and the largest receptive field for a 3D network.
 
-Let's try to train a 3D network to segment chloroplasts using the training data that we extracted with `--box-depth 16`:
+Let's try to train a 3D network to segment chloroplasts using the training data that we extracted with `--box-depth 16`. Note that the annotations for these training samples are still in 2D only - you don't need to annotate all 16 slices. We can train a 3D network using just 2D supervision (and augmentations inside of Ais ensure that the 3D convolutions still learn something meaningful) :
 
 ```
 ais train -a 'ezm-3d-L' -t 128x128x16_40.00Apx_Chloroplast.scnt -gpu 0,1,2,3 -e 100 -augment -c 8

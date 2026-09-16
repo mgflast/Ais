@@ -54,7 +54,7 @@ ais train -t <training_data...> -ou <output_directory> -gpu <gpu_ids> -a <archit
 | `-t`, `--training_data` | Path(s) to the `.scnt` file(s). Several may be given (`-t a.scnt b.scnt`); their samples are pooled. All must share the same box size and depth. |
 | `-ou`, `--output_directory` | Directory to save the model in. Default: current directory. |
 | `-gpu`, `--gpus` | Comma-separated GPU IDs, e.g. `0,1,2,3`. Default `0`. |
-| `-a`, `--model_architecture` | Which architecture to train — its index or its title, e.g. `13` or `'VGGNet M'`. Run `ais train -models` to print a list of available architectures. |
+| `-a`, `--model_architecture` | Which architecture to train — its index or its title, e.g. `10` or `'VGGNet M'`. Run `ais train -models` to print a list of available architectures. |
 | `-name`, `--model_name` | Model name. Saved as `output_directory/{name}.scnm`. |
 | `-e`, `--epochs` | Number of epochs. Default 50. |
 | `-b`, `--batch_size` | Batch size. Default 32. |
@@ -74,12 +74,19 @@ List the architectures and their indices:
 
 ```
 $ ais train -models
-index: 0 (-a 0)    ezm-2d-dice
+index: 0 (-a 0)    ezm-2d
 index: 1 (-a 1)    ezm-2d-bxe
-...
-index: 12 (-a 12)  VGGNet M
-index: 13 (-a 13)  VGGNet S
-...
+index: 2 (-a 2)    ezm-2d-dice
+index: 3 (-a 3)    ezm-3d-M
+index: 4 (-a 4)    ezm-3d-L
+index: 5 (-a 5)    Pix2pix
+index: 6 (-a 6)    UNet L
+index: 7 (-a 7)    UNet M
+index: 8 (-a 8)    UNet S
+index: 9 (-a 9)    VGGNet L
+index: 10 (-a 10)  VGGNet M
+index: 11 (-a 11)  VGGNet S
+index: 12 (-a 12)  VGGNet X
 ```
 
 Simplest case — point at the training data, name it, pick an architecture and GPUs:
@@ -91,7 +98,7 @@ ais train -t training_data/128x128x1_Membrane.scnt -name Membrane -ou models -gp
 With more settings — a lower learning rate, more epochs, and the extra augmentations:
 
 ```
-ais train -t training_data/128x128x1_Membrane.scnt -name Membrane -ou models -gpu 0,1,2,3 -a 12 -e 100 -r 1e-4 -augment
+ais train -t training_data/128x128x1_Membrane.scnt -name Membrane -ou models -gpu 0,1,2,3 -a 10 -e 100 -r 1e-4 -augment
 ```
 
 ## `ais segment`

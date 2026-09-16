@@ -316,6 +316,7 @@ class SEModel:
         self.model_depth = 1
         self.model = None
         self.model_enum = SEModel.DEFAULT_MODEL_ENUM
+        self.arch = None   # architecture title as stored in the model file; the enum is only the library pick for new models
         self.epochs = 50
         self.batch_size = 32
         self.train_data_path = "(path to training dataset)"
@@ -380,7 +381,7 @@ class SEModel:
                 'model_depth': self.model_depth,
                 'filament_diameter': self.filament_diameter,   # label-softening tube diameter (px), see se_scnt.soften_labels
                 'model_enum': self.model_enum,
-                'arch': SEModel.AVAILABLE_MODELS[self.model_enum] if 0 <= self.model_enum < len(SEModel.AVAILABLE_MODELS) else None,
+                'arch': self.get_model_title(),
                 'epochs': self.epochs,
                 'batch_size': self.batch_size,
                 'active': self.active,
@@ -463,12 +464,8 @@ class SEModel:
                 arch = metadata.get('arch')
                 if arch is None and 0 <= metadata['model_enum'] < len(SEModel.LEGACY_MODEL_ENUM):
                     arch = SEModel.LEGACY_MODEL_ENUM[metadata['model_enum']]
-                if arch in SEModel.AVAILABLE_MODELS:
-                    self.model_enum = SEModel.AVAILABLE_MODELS.index(arch)
-                else:
-                    if arch is not None:
-                        print(f"architecture '{arch}' is not in the model library; the model still works, but is listed under the default architecture.")
-                    self.model_enum = SEModel.DEFAULT_MODEL_ENUM
+                self.arch = arch
+                self.model_enum = SEModel.AVAILABLE_MODELS.index(arch) if arch in SEModel.AVAILABLE_MODELS else SEModel.DEFAULT_MODEL_ENUM
                 self.epochs = metadata['epochs']
                 self.batch_size = metadata['batch_size']
                 self.active = metadata['active']
@@ -592,6 +589,7 @@ class SEModel:
 
     def compile(self, box_size, box_depth=1):
         model_module_name = SEModel.AVAILABLE_MODELS[self.model_enum]
+        self.arch = model_module_name
         self.model = SEModel.MODELS[model_module_name]((box_size, box_size, box_depth))
         # Re-compile with the arch's own loss/optimizer plus streaming precision/recall,
         # so they are printed per epoch during training (like easymode). Masked metrics
@@ -644,14 +642,14 @@ class SEModel:
     def update_info(self):
         validation_split_tag = "" if ("VALIDATION_SPLIT" not in self.bcprms or self.bcprms["VALIDATION_SPLIT"] == 0.0) else f"|{int(self.bcprms['VALIDATION_SPLIT']*100.0)}%"
         if self.compilation_mode == 'training':
-            self.info = SEModel.AVAILABLE_MODELS[self.model_enum] + f" ({self.n_parameters / 1e6:.1f} Mp, {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
-            self.info_short = "(" + SEModel.AVAILABLE_MODELS[self.model_enum] + f", {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
+            self.info = self.get_model_title() + f" ({self.n_parameters / 1e6:.1f} Mp, {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
+            self.info_short = "(" + self.get_model_title() + f", {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
         elif self.compilation_mode == 'inference':
-            self.info = SEModel.AVAILABLE_MODELS[self.model_enum] + f" ({self.n_parameters / 1e6:.1f} Mp, {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
-            self.info_short = "(" + SEModel.AVAILABLE_MODELS[self.model_enum] + f", {self.box_size}-x{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
+            self.info = self.get_model_title() + f" ({self.n_parameters / 1e6:.1f} Mp, {self.box_size}-{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
+            self.info_short = "(" + self.get_model_title() + f", {self.box_size}-x{self.model_depth}, {self.apix:.1f}, {self.loss:.4f}{validation_split_tag})"
 
     def get_model_title(self):
-        return SEModel.AVAILABLE_MODELS[self.model_enum]
+        return self.arch or SEModel.AVAILABLE_MODELS[self.model_enum]
 
     def set_slice(self, slice_data, slice_pixel_size, roi, original_size, norm_stats=None):
         try:

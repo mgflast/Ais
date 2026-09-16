@@ -642,7 +642,7 @@ def train_model(training_data, output_directory, architecture=None, epochs=50, b
         model.load(model_path)
         if name != "Unnamed model":
             model.title = name
-        print(f"  architecture: {SEModel.AVAILABLE_MODELS[model.model_enum]}, box {model.box_size}-{model.model_depth}, {model.apix:.1f} A/px")
+        print(f"  architecture: {model.get_model_title()}, box {model.box_size}-{model.model_depth}, {model.apix:.1f} A/px")
     elif architecture is None:
         model.model_enum = SEModel.DEFAULT_MODEL_ENUM
         print(f"using default model architecture: {SEModel.AVAILABLE_MODELS[SEModel.DEFAULT_MODEL_ENUM]}")

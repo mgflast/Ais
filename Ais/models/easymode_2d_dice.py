@@ -2,10 +2,10 @@ import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Conv2DTranspose, BatchNormalization, concatenate, Dropout
 from tensorflow.keras.optimizers import Adam
-from .losses import masked_bce_dice
+from .losses import masked_dice
 
 
-title = "ezm-2d"
+title = "ezm-2d-dice"
 include = True
 
 
@@ -98,6 +98,6 @@ def create(input_shape, output_dimensionality=1):
     model = Model(inputs=[inputs], outputs=[output])
 
     # Compile the model with a suitable optimizer and loss function
-    model.compile(optimizer=Adam(learning_rate=5e-5), loss=masked_bce_dice(bce_weight=1.0, dice_weight=1.0))
+    model.compile(optimizer=Adam(learning_rate=5e-5), loss=masked_dice)
 
     return model
