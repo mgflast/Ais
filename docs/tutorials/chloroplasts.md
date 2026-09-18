@@ -1,8 +1,5 @@
 # Chloroplasts (EMPIAR-11830)
 
-!!! warning "Work in progress"
-    This tutorial is still being written. Some sections are incomplete, and details may change.
-
 In this tutorial we will prepare a network to segment chloroplasts in <i>C. reinhardtii</i> tomograms, using data from [EMPIAR-11830](https://www.ebi.ac.uk/empiar/EMPIAR-11830/). We assume you know the basics of training in Ais (if not, see the [quick start](quick_start.md) tutorial) and demonstrate some more involved steps that help you get to a good network. We will also do most steps (label extraction, training, inference) from the command line interface instead of the GUI - the only thing you _need_ the GUI for is annotation, and all the rest is easier via the CLI.
 
 ## 1. Downloading the data
@@ -43,7 +40,7 @@ Launch Ais and open up 5 of the tomograms. Open the [feature library](../feature
 ??? note "Box size, pixel size, and field of view"
     When extracting training data, you can choose at which pixel size to do this. You also choose a box size to extract. Together these determine the size of the field of view that the model sees during training; in turn, this determines how well the resulting model is able to use spatial context in inference. In principle it does not matter what the pixel size of the tomograms is when you annotate them. If for example you annotate 128-sized boxes on a pixel size of around 7.2 - 7.4 A/px, and then extract 128-sized boxes with pixel size 10.0, that's completely fine: although you're extracting a little bit beyond the box you annotated, Ais automatically sets a loss-mask for this margin to ensure that the region you did not annotate is not used for scoring during training.
 
-With the Chloroplast preset made, we annotate a few slices in each of the 5 tomograms we just opened and place boxes. When you're done with a tomogram - let's say after placing about 10 boxes - use `ctrl` + `S` to quick-save the annotations. That creates a `.scnt` file in the same directory as the original `.mrc`. When you revisit your annotations, you can open these `.scnt` files to continue where you left off.
+With the Chloroplast preset made, we annotate a few slices in each of the 5 tomograms we just opened and place boxes. When you're done with a tomogram - let's say after placing about 10 boxes - use `ctrl` + `S` to quick-save the annotations. That creates a `.scns` file in the same directory as the original `.mrc`. When you revisit your annotations, you can open these `.scns` files to continue where you left off.
 
 <video controls muted loop autoplay playsinline width="100%">
   <source src="../../res/chloroplasts_1.mp4" type="video/mp4">
@@ -73,12 +70,12 @@ Chloroplast: 39 training boxes - saving as 128x128x1_40.00Apx_Chloroplast.scnt
 If you want to use exactly the training data we prepared, you can download the resulting file: [128x128x1_40.00Apx_Chloroplast.scnt](../res/128x128x1_40.00Apx_Chloroplast.scnt){: download="128x128x1_40.00Apx_Chloroplast.scnt" } (5 MB).
 
 ### 2.3 Training the model
-Training via the command line with `ais train` is also a bit more versatile and powerful than doing it in the GUI. Although we normally use `VGGNet M` for a quick model with little training data, for this training dataset we found that `UNet M` worked much better. Generally if you're not sure which network to use, we would recommend training multiple different architectures and testing which is best in the GUI. The main thing we're looking at now: inference in the GUI should be fast, because we want to use the model to help us annotate more training data, and somewhat accurate - but it doesn't have to be perfect. If your version of Ais lacks `UNet M`, you can use `UNet L` or `VGGNet M`; run `ais train -models` to see which architectures are available.
+Training via the command line with `ais train` is also a bit more versatile and powerful than doing it in the GUI. Although we normally use `VGGNet M` for a quick model with little training data, for this training dataset we found that `UNet M` worked much better. Generally if you're not sure which network to use, we would recommend training multiple different architectures and testing which is best in the GUI. The main thing we're looking at now: inference in the GUI should be fast, because we want to use the model to help us annotate more training data, and should be at least somewhat accurate. It doesn't have to be perfect. If your version of Ais lacks `UNet M`, you can use `UNet L` or `VGGNet M`; run `ais train -models` to see which architectures are available.
 
 Use the command below to train a network. Note the `-gpu 0,1,2,3` argument - if you have more or fewer GPUs, adapt the list of numbers to your case. With four A100 GPUs (which is total overkill for this training run, by the way; a simple laptop GPU would have also worked) the training completed in 90 seconds.
 
 ```
-ais train -a 'UNet M' -t 128x128x1_40.00Apx_Chloroplast.scnt -gpu 0,1,2,3 -name Chloroplast -b 8 -augment -e 70
+ais train -a 'UNet M' -t 128x128x1_40.00Apx_Chloroplast.scnt -gpu 0,1,2,3 -name Chloroplast -augment -e 70
 ```
 
 Testing this model on some unseen tomograms, we can see that it already produces useful output. It just needs a little bit of polishing.
@@ -92,7 +89,7 @@ Testing this model on some unseen tomograms, we can see that it already produces
 ### 3.1 Creating a much larger training dataset
 The remaining tomograms will have mostly finished downloading by now. In general it is best to sample training data in many different tomograms, rather than sampling a lot in only a few tomograms. So with the preliminary model in place, we'll open up 20 more tomograms and add more annotations in each of them. We specifically pay mind to the regions where our preliminary model's output is not so good, and use [model-assisted annotation](../features/model_assisted_annotation.md) so that we don't have to draw everything from scratch.
 
-After about 30 minutes, we had annotations in place for 25 tomograms. You can download our annotations [here](https://github.com/mgflast/Ais/releases/tag/tutorial-data), as 25 separate `.scnt` files. Because `.scnt` files are softlinked to the corresponding `.mrc` files, you may have to fix a missing link when you open these files in Ais. To do so, open the 'File manager' (`Settings > File manager > Open file manager`) and use the Find & Replace tool to edit the `.mrc` file path.
+After about 30 minutes, we had annotations in place for 25 tomograms. You can download our annotations [here](https://github.com/mgflast/Ais/releases/tag/tutorial-data), as 25 separate `.scns` annotated-tomogram files. Because `.scns` files are softlinked to the corresponding `.mrc` files, you may have to fix a missing link when you open these files in Ais. To do so, open the 'File manager' (`Settings > File manager > Open file manager`) and use the Find & Replace tool to edit the `.mrc` file path.
 
 <video controls muted loop autoplay playsinline width="100%">
   <source src="../../res/chloroplasts_3.mp4" type="video/mp4">
@@ -117,10 +114,110 @@ Chloroplast: 266 training boxes - saving as 128x128x16_40.00Apx_Chloroplast.scnt
 ```
 
 ### 3.2 Training a 3D network
-There are no major differences between 2D and 2.5D networks, but true 3D networks do use a different architecture. In Ais, 3D architectures have the tag '3d' in their name; currently, you'll find `ezm-3d-M` and `ezm-3d-L`. You can think of these as the counterparts to the `UNet` or `VGGNet` sets of networks, with `M` a 19.6 million parameter network and `L` 31.0 million parameters and the largest receptive field for a 3D network.
+There are no major differences between 2D and 2.5D networks, but true 3D networks do use a different architecture. In Ais, 3D architectures have the tag '3d' in their name; currently, you'll find `ezm-3d-M` and `ezm-3d-L`. You can think of these as the counterparts to the `UNet` or `VGGNet` sets of networks, with `M` a 19.6 million parameter network and `L` 31.0 million parameters and the largest receptive field for a 3D network (266 px in XY, 74 in Z).
 
-Let's try to train a 3D network to segment chloroplasts using the training data that we extracted with `--box-depth 16`. Note that the annotations for these training samples are still in 2D only - you don't need to annotate all 16 slices. We can train a 3D network using just 2D supervision (and augmentations inside of Ais ensure that the 3D convolutions still learn something meaningful) :
+Let's try to train a 3D network to segment chloroplasts using the training data that we extracted with `--box-depth 16`. Note that the annotations for these training samples are still in 2D only - you don't need to annotate all 16 slices. We can train a 3D network using just 2D supervision (augmentations during training ensure that the 3D convolutions still learn something meaningful):
 
 ```
-ais train -a 'ezm-3d-L' -t 128x128x16_40.00Apx_Chloroplast.scnt -gpu 0,1,2,3 -e 100 -augment -c 8
+ais train -a 'ezm-3d-L' -t 128x128x16_40.00Apx_Chloroplast.scnt -gpu 0,1,2,3 -e 100 -augment -name Chloroplast
 ```
+
+Using 4 A100 GPUs, this took around 30 minutes.
+
+### 3.3 Applying the 3D network
+We could open this network in the Ais GUI again and assess the output, but testing a model one slice at a time can be a little bit cumbersome, especially for a relatively large model like the one we just trained. Instead, we can also just apply the model to all of the data and visualize how well it segments chloroplasts. We use the `ais segment` command:
+
+```
+ais segment -m Chloroplast.scnm -gpu 0,1,2,3 -d tomograms/ -ou segmented/
+```
+
+Using the same 4 A100 GPUs as for training, segmentation took just under 5 minutes (~6 seconds per tomogram).
+
+### 3.4 Visualizing the results
+Inspecting 50 segmentation volumes one-by-one and by hand is laborious, so instead we'll show you how to use [Pom](https://mgflast.github.io/easymode/user_guide/pom/data_browser/), a tool to organise and visualize large scale segmented datasets. Run `pom initialize` to see if it is already installed. If not, follow [these instructions](https://mgflast.github.io/easymode/user_guide/pom/installation/) to install Pom. After installation, we tell Pom where our tomograms and segmentations are:
+
+```
+pom initialize
+pom add_source -t tomograms/ -s segmented/
+```
+
+And then set up the Pom database and generate some images:
+
+```
+pom summarize
+pom projections
+```
+
+To explore the database:
+
+```
+pom browse &
+```
+This prints an IP address that you can visit in a browser. If you're running Pom on a cluster but Ais on a local machine, make sure to visit the network URL rather than the local host.
+
+In the Gallery, you can sort tomograms by how much of their volume is occupied by Chloroplast - or at least, how much Chloroplast our network thinks is there. You can also toggle back and forth between seeing the tomogram density and the corresponding chloroplast segmentation.
+
+<video controls muted loop autoplay playsinline width="100%">
+  <source src="../../res/chloroplasts_4.mp4" type="video/mp4">
+</video>
+<p style="text-align: center; font-style: italic; color: var(--md-default-fg-color--light); margin-top: 0.5em;">Exploring segmentation results in Pom, showing first the Gallery, then a tomogram detail page, and finally the Visualization settings page where we set up a 3D visualization to render with <code>pom render</code>.</p>
+
+On the `Visualization settings` page (see video above), you can set up a scene for 3D rendering. Give chloroplasts some colour, choose whether to render them as isosurface meshes or ray-traced volumes, and add the feature Chloroplast to the default 'thumbnail' composition. Then back in the terminal, run:
+
+```
+pom render
+```
+
+Now back in the browser app you can see the resulting 3D visualisations alongside the tomogram previews.
+
+### 3.5 Final proofreading & corrections
+You can probably spot some mistakes in the 3D network's segmentation output as you browse them in the Pom app. For example, for our network, the top-left corner in tomogram 1728 was not correctly segmented:
+
+<p align="center"><img src="../../res/chloroplasts_example.png" width="60%"></p>
+
+To fix that, we can just sample some more training data in that specific area. Open the Ais GUI again, and in `Settings > Pom`, activate `Synchronize Ais and Pom`. If you are running Pom and Ais on the same system, you can ignore the `Set command directory` setting; if you are running Pom on a cluster, and the Ais GUI locally, set the command directory to some directory that both systems have access to (do this for both the locally running Ais, and on the cluster, either via the Ais GUI or in ~/.Ais/settings.txt). Pom writes a little file called `ais_to_pom.cmd` to this directory, which Ais reads and executes.
+
+With that set, the 'open in Ais' button in the Pom browser should now work (if this button is not visible: Pom only shows it if Ais is available in the same environment from which you run Pom). For any tomogram where you see the network needs to be improved, you can now open it in Ais from the Pom app and do the required extra bit of annotation.
+
+We added annotations for just 4 tomograms. With those saved, we then extract the updated training data one last time:
+
+```
+ais extract --features Chloroplast --data_directory tomograms/ --output_directory . --box-size 128 --box-depth 16 --apix 40.0
+```
+
+And rather than training a new model from scratch, we use the previous model as the starting point - most of the training data is still the same, anyway:
+
+```
+ais train -m Chloroplast.scnm -t 128x128x16_40.00Apx_Chloroplast.scnt -gpu 0,1,2,3 -e 50 -augment -name Chloroplast_v2
+```
+
+And after about 15 minutes of training, let's segment for the last time. We'll set the test-time augmentation (`tta`) count to 4 this time - if you want to compare the new and previous model more directly, leave it at 1 as before:
+
+```
+ais segment -m Chloroplast_v2.scnm -d tomograms/ -ou segmented/ -gpu 0,1,2,3 -tta 4
+```
+
+When that run completes, you could re-run `pom summarize; pom projections;` to include the new results in the Pom app as well. Because we named the model `Chloroplast_v2`, the output segmentations will be called something like `0001__Chloroplast_v2.mrc` and sit alongside the previous `0001__Chloroplast.mrc`, so that both will show up in Pom and can be easily compared.
+
+## 4. Visualizing chloroplasts in cells
+Ais segmentations are conventional `.mrc` files and can be plugged straight into any tool that uses segmentations. For now, we'll just use the model for visualization, in combination with the [easymode](https://mgflast.github.io/easymode/) mitochondrion and cytoplasm models, so that we can show these three major compartments at a glance:
+
+```
+easymode segment mitochondrion cytoplasm --data tomograms --output segmented
+```
+
+When that's done, we re-run `pom summarize` and `pom projections` and set up a new 3D visualization in the Pom app.
+
+<video controls muted loop autoplay playsinline width="100%">
+  <source src="../../res/chloroplasts_5.mp4" type="video/mp4">
+</video>
+<p style="text-align: center; font-style: italic; color: var(--md-default-fg-color--light); margin-top: 0.5em;">3D visualizations of chloroplasts using our Ais model, along with cytoplasm and mitochondrion segmented by easymode general networks.</p>
+
+## Summary
+In this tutorial we covered:
+
+- extracting training data from the command line with `ais extract`
+- extracting beyond what you annotated: a larger box than the one you drew in, or a 3D slab around a 2D annotation
+- training a model from the command line with `ais train`
+- segmenting a full dataset with `ais segment`
+- iteratively improving a network: a quick model to speed up annotation, training your working model, review in Pom, proofreading & extra annotation, and continuing training with a previously generated model

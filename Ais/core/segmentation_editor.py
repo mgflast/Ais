@@ -3655,7 +3655,7 @@ class SegmentationEditor:
         try:
             apix = float(apix) if apix and apix > 0 else 10.0
             box_size = int(boxsize)
-            z_jitter = 8 if int(boxdepth) > 1 else 0        # extra Z context for slab-depth training
+            z_jitter = 16 if int(boxdepth) > 1 else 0        # extra Z context for slab-depth training
             stored_depth = int(boxdepth) + z_jitter
             GROUP = "__gui_export__"
 

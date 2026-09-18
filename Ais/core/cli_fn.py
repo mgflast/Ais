@@ -1121,7 +1121,7 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
     # for any slab (box_depth > 1) store 4 extra slices top & bottom, so 3D training can jitter the
     # annotated slice's Z-position within the box (breaks the "only the centre slice is learned"
     # failure mode). box_depth stays the MODEL depth; the .scnt just carries the extra context.
-    Z_JITTER = 8 if box_depth > 1 else 0
+    Z_JITTER = 16 if box_depth > 1 else 0   # +-8: every output position of a 16-slab gets the annotated slice
     stored_depth = box_depth + Z_JITTER
     annotated_tomograms = glob.glob(os.path.join(data_directory, "*.scns"))
 
@@ -1188,9 +1188,11 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
         # resampled in XY to the target --apix (Z preserved, matching inference), so mixed-apix
         # tomograms land on a common grid. When native ~= target (<5%) the box is kept as-is.
         native_bs = int(box_size)
+        n_slices = None
         if not coordinates:
             with mrcfile.open(tomo, header_only=True) as _mrc:
                 native_apix = float(_mrc.voxel_size.x)
+                n_slices = int(_mrc.header.nz)
             if native_apix <= 0 or abs(native_apix - 1.0) < 1e-6:
                 w_notes.append('\033[38;5;208m' + f'{os.path.basename(tomo)}: header pixel size {native_apix} A/px looks unset; treating as --apix {apix:.2f} (no rescale)' + '\033[0m')
                 native_apix = apix
@@ -1230,10 +1232,12 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
             w_adds.append((f.title, len(box_coordinates), tuple(flavour_paths.keys())))
             group = MERGED_GROUP if merge else f.title
             for z, x, y in box_coordinates:
-                if z in f.slices and f.slices[z] is not None:
-                    label_patch = se_scnt.extract_label(f, z, y, x, native_bs)
-                else:
+                if z not in f.slices or f.slices[z] is None:
                     label_patch = None
+                elif stored_depth > 1:   # slab label over the stored window; other annotated slices count inside their boxes
+                    label_patch = se_scnt.extract_label_slab(f, z, y, x, native_bs, stored_depth, n_slices)
+                else:
+                    label_patch = se_scnt.extract_label(f, z, y, x, native_bs)
                 w_tasks.append({
                     'group': group,
                     'hash': se_scnt.make_id(tomo_stem, f.title, z, y, x),

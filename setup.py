@@ -7,7 +7,7 @@ import shutil
 # python setup.py sdist
 # twine upload dist/*
 
-VERSION = '1.2.38'
+VERSION = '1.2.39'
 
 with open("README.md", "r", encoding="utf-8") as f:
     long_description = f.read()

@@ -18,7 +18,7 @@ ais extract -d <data_directory> -f <features...> [-ou <output_directory>] [-size
 | `-f`, `--features` | Features to extract, e.g. `-f Membrane Ribosome Microtubule`. A separate output file is written for each. **Required.** |
 | `-ou`, `--output_directory` | Where to write the `.scnt` files. Default: current directory. |
 | `-size`, `--box-size` | Box size in pixels. Default 128; if omitted, the size stored in the annotations is used. |
-| `-depth`, `--box-depth` | Box depth in Z. Default 1 (2D). Must be odd (1 is added if not). Use a value >1 for a 2.5D dataset. |
+| `-depth`, `--box-depth` | Box depth in Z. Default 1 (2D). Must be odd (1 is added if not). Use a value >1 for a 2.5D or 3D dataset; the label is then a slab too, with every annotated slice in the window contributing inside its own boxes and everything else set to ignore. |
 | `-e`, `--exclude` | Glob pattern, or a `.txt` file listing volumes to exclude from the dataset. |
 | `-a`, `--apix` | Target pixel size for the extracted boxes (default 10.0). Together with `-size`, this determines the actual field of view size in any extracted box. |
 | `--merge` | Write a single file per feature, pooling all input volumes, instead of one file per volume. |

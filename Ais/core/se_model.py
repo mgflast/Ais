@@ -96,9 +96,9 @@ class SEModelDataLoader:
         self.idx_training_positive = [i for i in idx_positive if i in self.idx_training_all]
 
     def get_sample(self, index, training=True):
-        x, y = self.dataset.get_sample(index, training=training)   # x (H,W,stored), y (H,W,1)
+        x, y = self.dataset.get_sample(index, training=training)   # x (H,W,stored), y (H,W,1) or (H,W,stored) slab
         if self.stored_depth == self.box_depth and not self.slab:
-            return x, y
+            return x, (y if y.shape[2] == 1 else y[:, :, self.stored_depth // 2][:, :, None])
         return self._crop(x, y, training)
 
     def _crop(self, x, y, training):
@@ -106,13 +106,20 @@ class SEModelDataLoader:
         # offset is random (so the annotated slice lands at a random Z-position, supervised via a
         # masked slab label); otherwise it's centred. The annotation sits at stored_depth//2.
         D, maxoff = self.box_depth, self.stored_depth - self.box_depth
-        o = int(np.random.randint(0, maxoff + 1)) if (self.slab and training and maxoff > 0) else maxoff // 2
+        c = self.stored_depth // 2                                   # annotated slice in the stored box
+        lo, hi = max(0, c - (D - 1)), min(maxoff, c)                 # offsets that keep it inside the crop
+        o = int(np.random.randint(lo, hi + 1)) if (self.slab and training and maxoff > 0) else maxoff // 2
         x = x[:, :, o:o + D]
+        r = self.stored_depth // 2 - o                              # annotated slice's index in the crop
         if self.slab:
-            r = self.stored_depth // 2 - o                          # annotated slice's index in the crop
-            yl = np.full((y.shape[0], y.shape[1], D, 1), 2.0, dtype=np.float32)   # ignore everywhere
-            yl[:, :, r, 0] = y[:, :, 0]                              # real label only on the annotated slice
-            y = yl
+            if y.shape[2] > 1:                                       # stored slab label: crop it like x
+                y = y[:, :, o:o + D, None]
+            else:
+                yl = np.full((y.shape[0], y.shape[1], D, 1), 2.0, dtype=np.float32)   # ignore everywhere
+                yl[:, :, r, 0] = y[:, :, 0]                          # real label only on the annotated slice
+                y = yl
+        elif y.shape[2] > 1:                                         # 2D-output model: the annotated slice only
+            y = y[:, :, r][:, :, None]
         return x, y
 
     @staticmethod
@@ -595,7 +602,7 @@ class SEModel:
         # so they are printed per epoch during training (like easymode). Masked metrics
         # respect the ignore label (2) and treat label==1 as foreground.
         self.model.compile(optimizer=self.model.optimizer, loss=self.model.loss,
-                           metrics=[MaskedPrecision(), MaskedRecall()])
+                           metrics=[MaskedPrecision(name='precision'), MaskedRecall(name='recall')])
         self.compiled = True
         self.compilation_mode = 'training'
         self.box_size = box_size

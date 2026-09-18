@@ -5,6 +5,7 @@ repo_name: mgflast/Ais
 repo_url: https://github.com/mgflast/Ais
 copyright: © Mart So-Last, 2026, mgflast@gmail.com
 nav:
+   - "🏠 Home": index.md
    - "📖 User Guide":
        - "⚙️ Installation": installation.md
        - "<b>The Ais Workflow</b>":
@@ -33,7 +34,6 @@ nav:
           - "ais train": "/Ais/cli/reference/#ais-train"
           - "ais segment": "/Ais/cli/reference/#ais-segment"
           - "ais pick": "/Ais/cli/reference/#ais-pick"
-   - "🗄️ Model repository": https://www.aiscryoet.org
    - "🐞 Submit a bug": https://github.com/mgflast/Ais/issues
    - "🐸 easymode": https://mgflast.github.io/easymode/
    - "🤖 Pom": https://github.com/mgflast/Pom

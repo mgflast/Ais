@@ -79,6 +79,8 @@ def _soft_tube_label(label, sigma, ignore_label=2.0):
     This makes the target robust to blunt / over-wide 2D drawing - only the centerline matters."""
     from skimage.morphology import skeletonize
     from scipy.ndimage import distance_transform_edt
+    if label.ndim == 3:   # slab label: per slice, the annotated slices are sparse in Z
+        return np.stack([_soft_tube_label(sl, sigma, ignore_label) for sl in label])
     soft = np.zeros(label.shape, dtype=np.float32)
     fg = (label == 1)
     if fg.any():
@@ -144,6 +146,47 @@ def extract_label(feature, z, y, x, box_size):
     return labels
 
 
+def extract_label_slab(feature, z, y, x, box_size, box_depth, n_slices):
+    """(box_depth, box_size, box_size) label slab around the box slice z, same Z window as extract_box.
+    The box slice is taken whole; any other annotated slice contributes only inside its own boxes;
+    everything else is ignore (2)."""
+    box_size, box_depth = int(box_size), int(box_depth)
+    ann_bs = int(getattr(feature, 'box_size', box_size))
+    z0 = z - box_depth // 2
+    half = box_size // 2
+    y0, x0 = y - half, x - half
+    slab = np.full((box_depth, box_size, box_size), 2.0, dtype=np.float32)
+    for zi in range(z0, z0 + box_depth):
+        if zi < 0 or zi >= n_slices or zi not in feature.slices or feature.slices[zi] is None:
+            continue
+        if zi == z:
+            slab[zi - z0] = extract_label(feature, zi, y, x, box_size)
+            continue
+        boxes = feature.boxes.get(zi) or []
+        if not boxes:
+            continue
+        patch = extract_label(feature, zi, y, x, box_size).astype(np.float32)
+        valid = np.zeros((box_size, box_size), dtype=bool)
+        for bx, by in boxes:
+            by0, bx0 = by - ann_bs // 2 - y0, bx - ann_bs // 2 - x0
+            valid[max(by0, 0):max(by0 + ann_bs, 0), max(bx0, 0):max(bx0 + ann_bs, 0)] = True
+        patch[~valid] = 2
+        slab[zi - z0] = patch
+    return slab
+
+
+def _mask_label(label, validity, margin_per_side):
+    """Ignore padded/out-of-image pixels and the unannotated margin; label is (H, W) or (D, H, W)."""
+    label[..., validity == 0] = 2
+    m = int(margin_per_side)
+    if m > 0:
+        label[..., :m, :] = 2
+        label[..., -m:, :] = 2
+        label[..., :, :m] = 2
+        label[..., :, -m:] = 2
+    return label
+
+
 def extract_feature_samples(tomo_stem, flavour_data, annotated_flavour,
                             feature, box_size, box_depth, is_negative=False,
                             tomo_path=None, on_box=None):
@@ -176,15 +219,11 @@ def extract_feature_samples(tomo_stem, flavour_data, annotated_flavour,
 
         if is_negative or z not in feature.slices or feature.slices[z] is None:
             label = np.zeros((box_size, box_size), dtype=np.float32)
+        elif box_depth > 1:
+            label = extract_label_slab(feature, z, y, x, box_size, box_depth, n_slices)
         else:
             label = extract_label(feature, z, y, x, box_size).astype(np.float32)
-
-        label[validity == 0] = 2
-        if margin_per_side > 0:
-            label[:margin_per_side, :] = 2
-            label[-margin_per_side:, :] = 2
-            label[:, :margin_per_side] = 2
-            label[:, -margin_per_side:] = 2
+        label = _mask_label(label, validity, margin_per_side)
 
         h = make_id(tomo_stem, feature.title, z, y, x)
         samples.append({
@@ -349,14 +388,11 @@ def extract_box_task(task):
         label = np.zeros((box_size, box_size), dtype=np.float32)
     else:
         label = np.array(task['label_patch'], dtype=np.float32)
-    label[validity == 0] = 2
-    m_per = task['margin_per_side']
-    if m_per > 0:
-        label[:m_per, :] = 2
-        label[-m_per:, :] = 2
-        label[:, :m_per] = 2
-        label[:, -m_per:] = 2
-    label = _scale_xy(label[None, :, :], out_box_size, anti_aliasing=False)[0]
+    label = _mask_label(label, validity, task['margin_per_side'])
+    if label.ndim == 2:
+        label = _scale_xy(label[None, :, :], out_box_size, anti_aliasing=False)[0]
+    else:
+        label = _scale_xy(label, out_box_size, anti_aliasing=False)
 
     y_dir = os.path.join(group_dir, LABEL_DIR)
     os.makedirs(y_dir, exist_ok=True)
@@ -588,7 +624,8 @@ class ScntTrainingSet:
             vol = self._read_input(h, flavour)
 
         x = np.transpose(vol, (1, 2, 0)).astype(np.float32)        # (H, W, D); astype copy fences the cache
-        y = self._read_label(h)[:, :, None].astype(np.float32)      # (H, W, 1); from in-place edits downstream
+        y = self._read_label(h).astype(np.float32)
+        y = y[:, :, None] if y.ndim == 2 else np.transpose(y, (1, 2, 0))   # (H, W, 1) or (H, W, D) slab
         return x, y
 
     def source_records(self):
