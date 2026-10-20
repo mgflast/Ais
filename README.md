@@ -30,7 +30,14 @@ ais
 ais-cryoet
 ```
 #### Tensorflow & CUDA compatibility ####
-Compatibility between Python, tensorflow, and CUDA versions can be an issue. The following combination was used during development and is known to work:
+Compatibility between Python, tensorflow, and CUDA versions can be an issue. Ais supports tensorflow 2.8 to 2.15. The simplest setup is tensorflow 2.15, which ships its own CUDA and cuDNN libraries:
+
+```
+pip install "tensorflow[and-cuda]==2.15.1"
+pip install ais-cryoet
+```
+
+This also lets `ais segment --xla` compile the network for faster inference. The following older combination was used during development and is also known to work:
 
 Python 3.9<br/>
 Tensorflow 2.8.0<br/>

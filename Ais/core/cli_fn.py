@@ -11,6 +11,31 @@ tf.get_logger().setLevel('ERROR')
 import numpy as np
 
 
+class _XLAModel:
+    """The cloned inference model behind one XLA-compiled function (``ais segment --xla``).
+
+    Called like the model, so the slice loop and _infer_slab are unchanged. XLA compiles once per
+    input shape and fuses the work between the convolutions. If a call raises (e.g. an older
+    TensorFlow/cuDNN whose fused convolutions fail under XLA), that call and all later ones run on
+    the plain model instead, after one warning, so a run never fails because of --xla.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self._compiled = tf.function(lambda x: model(x, training=False), jit_compile=True)
+        self._fallback = False
+
+    def __call__(self, x, training=False):
+        if not self._fallback:
+            try:
+                return self._compiled(tf.convert_to_tensor(x))
+            except Exception as e:
+                self._fallback = True
+                reason = (str(e).strip().splitlines() or [''])[0][:200]
+                print(f"warning: XLA failed ({type(e).__name__}: {reason}); continuing without XLA.")
+        return self.model(x, training=False)
+
+
 def glfw_init():
     if not glfw.init():
         raise Exception("Could not initialize GLFW library for headless start!")
@@ -276,7 +301,7 @@ def _install_claim_cleanup():
         pass
 
 
-def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_augmentation=1, overwrite=False, model_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=4, center=100.0, tile_size=None, overlap=None, data_apix=None):
+def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_augmentation=1, overwrite=False, model_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=4, center=100.0, tile_size=None, overlap=None, data_apix=None, xla=False):
     from keras.models import clone_model
     from keras.layers import Input
 
@@ -310,6 +335,8 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
     # a slab model emits a full Z-slab (rank-5 output); it needs Z-tiled slab inference rather
     # than the per-slice window loop.
     is_slab = (len(new_model.output_shape) == 5)
+    if xla:
+        new_model = _XLAModel(new_model)
 
     import threading
     import queue as _queue
@@ -443,7 +470,7 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
     executor.shutdown(wait=False)
 
 
-def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus, test_time_augmentation=1, parallel=1, overwrite=0, processing_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=None, center=100.0, tile_size=None, overlap=None, data_apix=None):
+def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus, test_time_augmentation=1, parallel=1, overwrite=0, processing_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=None, center=100.0, tile_size=None, overlap=None, data_apix=None, xla=False):
     if n_workers is None:
         n_workers = min(16, max(1, (os.cpu_count() or 1) // len(gpus)))
     if not os.path.isabs(model_path):
@@ -524,7 +551,8 @@ def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus,
                     center,
                     tile_size,
                     overlap,
-                    data_apix
+                    data_apix,
+                    xla
                 ),
             )
             processes.append(p)
@@ -549,7 +577,8 @@ def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus,
             center,
             tile_size,
             overlap,
-            data_apix
+            data_apix,
+            xla
         )
 
 

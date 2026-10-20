@@ -81,6 +81,7 @@ def main():
     segment_parser.add_argument('--workers', required=False, type=int, default=None, help="Number of CPU worker threads per GPU for preprocessing and postprocessing (default: cpu_count / n_gpus). Threads are shared dynamically between the two stages.")
     segment_parser.add_argument('--tile', required=False, type=int, default=None, help="XY tile size (px) for 3D models (default 512; rounded down to a multiple of 32). Tiles are square; the Z extent of a tile is the model's slab depth and is not configurable. Use -1 to disable tiling and segment the full plane in one piece, as before tiling was added - fastest, but needs enough VRAM for the whole tomogram. Ignored by 2D and 2.5D models, which process whole slices.")
     segment_parser.add_argument('--overlap', required=False, type=int, default=None, help="Overlap (px) discarded at each side of an XY tile for 3D models (default 64), so neighbouring tiles stride by tile - 2*overlap. Raise it if tile seams are visible; capped at tile/3.")
+    segment_parser.add_argument('--xla', required=False, action='store_true', help="XLA-compile the network for faster inference, as 'ais train --xla' does for training. The first batch or tile of each shape takes extra time while the network compiles; if compilation fails, segmentation continues without it.")
     segment_parser.add_argument('--center', required=False, type=float, default=100.0, help="Percentage of the volume depth (Z) to segment, centered on the middle. E.g. --center 50 segments only the central 50%%. Default 100 (full volume).")
 
     pick_parser = subparsers.add_parser('pick', help='Pick particles using segmented volumes.')
@@ -179,7 +180,8 @@ def main():
                 n_workers=args.workers,
                 center=args.center,
                 tile_size=args.tile,
-                overlap=args.overlap
+                overlap=args.overlap,
+                xla=args.xla
             )
 
         elif args.command == 'pick':
