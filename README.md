@@ -19,7 +19,7 @@ Ais works on Windows and Linux machines but not on MacOS. Install as follows:
 ```
 conda create --name ais
 conda activate ais
-conda install python==3.9
+conda install python==3.10
 conda install pip
 pip install git+https://github.com/mgflast/Ais
 ```
@@ -30,20 +30,22 @@ ais
 ais-cryoet
 ```
 #### Tensorflow & CUDA compatibility ####
-Compatibility between Python, tensorflow, and CUDA versions can be an issue. Ais supports tensorflow 2.8 to 2.15. The simplest setup is tensorflow 2.15, which ships its own CUDA and cuDNN libraries:
+Compatibility between Python, tensorflow, and CUDA versions can be an issue. Ais supports tensorflow 2.8.2 to 2.21. The simplest setup is tensorflow 2.21 (Python 3.10 to 3.13), which ships its own CUDA and cuDNN libraries:
 
 ```
-pip install "tensorflow[and-cuda]==2.15.1"
+pip install "tensorflow[and-cuda]==2.21.*"
 pip install ais-cryoet
 ```
 
-This also lets `ais segment --xla` compile the network for faster inference. The following older combination was used during development and is also known to work:
+This also lets `ais segment --xla` compile the network for faster inference. On native Windows, tensorflow 2.10 is the last version with GPU support. The following older combination was used during development and is also known to work:
 
 Python 3.9<br/>
 Tensorflow 2.8.0<br/>
 CUDA 11.8<br/>
 cuDNN 8.6<br/>
 protobuf 3.20.0<br/>
+
+Tensorflow 2.16 and later come with Keras 3. Models trained there are saved in the Keras 3 format, which this version of Ais reads with every supported tensorflow, but which Ais 1.2.40 and earlier cannot read. To use such a model with an older Ais, convert it once with `ais convert model.scnm [converted.scnm]` in an environment with Keras 2: tensorflow 2.15 or older, or a newer tensorflow with the matching tf-keras installed (e.g. `pip install "tf-keras==2.21.*"`) and the environment variable `TF_USE_LEGACY_KERAS=1`. Models trained with tensorflow 2.15 or older need no conversion.
 
 The software will work without CUDA, but only on the CPU. This is much slower but still reasonably interactive if the tomograms aren't too big (in XY). We do recommend installing CUDA and cuDNN in order for tensorflow to be able to use the GPU. See: https://docs.nvidia.com/deeplearning/cudnn/install-guide/index.html for help installing CUDA and cuDNN. 
 

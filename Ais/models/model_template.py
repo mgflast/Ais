@@ -33,7 +33,7 @@ class TemplateModel:
 
     def fit(self, train_x, train_y, epochs, batch_size=1, shuffle=True, callbacks=[]):
         for c in callbacks:
-            c.params['epochs'] = epochs
+            c.set_params({**(c.params or {}), 'epochs': epochs})   # Keras 3 leaves params None until set
 
         # fit model, e.g.:
         for e in range(epochs):

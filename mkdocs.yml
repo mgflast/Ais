@@ -34,6 +34,7 @@ nav:
           - "ais train": "/Ais/cli/reference/#ais-train"
           - "ais segment": "/Ais/cli/reference/#ais-segment"
           - "ais pick": "/Ais/cli/reference/#ais-pick"
+          - "ais convert": "/Ais/cli/reference/#ais-convert"
    - "🐞 Submit a bug": https://github.com/mgflast/Ais/issues
    - "🐸 easymode": https://mgflast.github.io/easymode/
    - "🤖 Pom": https://github.com/mgflast/Pom
