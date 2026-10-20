@@ -35,7 +35,7 @@ pip install ais-cryoet
 
 On native Windows, TensorFlow 2.10 is the last version with GPU support.
 
-TensorFlow 2.16 and later come with Keras 3. Models trained there are saved in the Keras 3 format, which this version of Ais reads with every supported TensorFlow, but which Ais 1.2.40 and earlier cannot read. To use such a model with an older Ais, convert it once with `ais convert model.scnm [converted.scnm]` in an environment with Keras 2: TensorFlow 2.15 or older, or a newer TensorFlow with the matching tf-keras installed (e.g. `pip install "tf-keras==2.21.*"`) and the environment variable `TF_USE_LEGACY_KERAS=1`. Models trained with TensorFlow 2.15 or older need no conversion.
+TensorFlow 2.16 and later come with Keras 3. Ais saves models in the Keras 2 format there too, so a model trained with any supported TensorFlow loads in every Ais version, including 1.2.40 and earlier. The exception is a custom architecture with layers or settings outside those of the built-in architectures: it is saved in the Keras 3 format, with a warning, and needs `ais convert model.scnm [converted.scnm]` in an environment with Keras 2 (TensorFlow 2.15 or older, or a newer TensorFlow with the matching tf-keras installed, e.g. `pip install "tf-keras==2.21.*"`, and the environment variable `TF_USE_LEGACY_KERAS=1`) before an older Ais can read it.
 
 When running Ais from within an IDE some paths may need to be manually specified. In PyCharm, add the path to the zlib `.dll` to the run configuration environment variables as follows to enable TensorFlow using the GPU:
 

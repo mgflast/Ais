@@ -5,6 +5,7 @@ from tensorflow.keras.callbacks import CallbackList
 import tensorflow as tf
 from .losses import masked_bce
 from Ais.core.keras_compat import load_keras_model
+from Ais.core.keras2_h5 import save_keras2_h5
 
 # adapted from source: https://github.com/eriklindernoren/Keras-GAN
 title = "Pix2pix"
@@ -177,7 +178,7 @@ class Pix2Pix:
         self.generator.set_weights(weights)
 
     def save(self, model_path):
-        self.generator.save(model_path)
+        return save_keras2_h5(self.generator, model_path)
 
     def load(self, model_path):
         self.generator = load_keras_model(model_path)

@@ -45,7 +45,7 @@ CUDA 11.8<br/>
 cuDNN 8.6<br/>
 protobuf 3.20.0<br/>
 
-Tensorflow 2.16 and later come with Keras 3. Models trained there are saved in the Keras 3 format, which this version of Ais reads with every supported tensorflow, but which Ais 1.2.40 and earlier cannot read. To use such a model with an older Ais, convert it once with `ais convert model.scnm [converted.scnm]` in an environment with Keras 2: tensorflow 2.15 or older, or a newer tensorflow with the matching tf-keras installed (e.g. `pip install "tf-keras==2.21.*"`) and the environment variable `TF_USE_LEGACY_KERAS=1`. Models trained with tensorflow 2.15 or older need no conversion.
+Tensorflow 2.16 and later come with Keras 3. Ais saves models in the Keras 2 format there too, so a model trained with any supported tensorflow loads in every Ais version, including 1.2.40 and earlier. The exception is a custom architecture with layers or settings outside those of the built-in architectures: it is saved in the Keras 3 format, with a warning, and needs `ais convert model.scnm [converted.scnm]` in an environment with Keras 2 (tensorflow 2.15 or older, or a newer tensorflow with the matching tf-keras installed, e.g. `pip install "tf-keras==2.21.*"`, and the environment variable `TF_USE_LEGACY_KERAS=1`) before an older Ais can read it.
 
 The software will work without CUDA, but only on the CPU. This is much slower but still reasonably interactive if the tomograms aren't too big (in XY). We do recommend installing CUDA and cuDNN in order for tensorflow to be able to use the GPU. See: https://docs.nvidia.com/deeplearning/cudnn/install-guide/index.html for help installing CUDA and cuDNN. 
 

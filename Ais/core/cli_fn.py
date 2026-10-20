@@ -722,15 +722,11 @@ def train_model(training_data, output_directory, architecture=None, epochs=50, b
 
 
 def convert_model(model_path, output_path=None):
-    """Re-save a model in the Keras 2 format. A model saved by Keras 3 (TensorFlow 2.16 and later) holds a model
-    description that Keras 2 cannot parse; new Ais rebuilds the architecture in that case, but older Ais cannot."""
+    """Re-save a model in the Keras 2 format. A model saved in the Keras 3 format holds a model description that
+    Keras 2 cannot parse; new Ais rebuilds the architecture in that case, but older Ais cannot."""
     import tempfile
-    from Ais.core.keras_compat import KERAS_3, KERAS_VERSION
+    from Ais.core.keras_compat import KERAS_VERSION
 
-    if KERAS_3:
-        print(f"Error: ais convert needs Keras 2 to write the Keras 2 format, but TensorFlow {tf.__version__} uses Keras {KERAS_VERSION}. "
-              f"Run it with TensorFlow 2.15 or older, or install tf-keras=={tf.__version__.rsplit('.', 1)[0]}.* and set TF_USE_LEGACY_KERAS=1.")
-        exit(1)
     output_path = os.path.abspath(output_path or model_path)
     model = SEModel(no_glfw=True)
     model.load(model_path)
@@ -740,9 +736,12 @@ def convert_model(model_path, output_path=None):
     # into place, so a failed save never leaves a partial file (or, in place, destroys the input)
     with tempfile.TemporaryDirectory(dir=os.path.dirname(output_path)) as temp_dir:
         temp_path = os.path.join(temp_dir, os.path.basename(output_path))
-        model.save(temp_path)
+        if model.save(temp_path) is False:
+            print(f"Error: Ais cannot write this model in the Keras 2 format with Keras {KERAS_VERSION}. Run ais convert with "
+                  f"Keras 2: TensorFlow 2.15 or older, or tf-keras=={tf.__version__.rsplit('.', 1)[0]}.* with TF_USE_LEGACY_KERAS=1.")
+            exit(1)
         os.replace(temp_path, output_path)
-    print(f"Saved {output_path} in the Keras {KERAS_VERSION} format.")
+    print(f"Saved {output_path} in the Keras 2 format.")
 
 
 def _pick_tomo(tomo_path, output_path, margin, threshold, binning, spacing, size, spacing_px, size_px, verbose, filament=False, filament_length=500.0, filament_length_px=None, centroid=False, min_particles=0, twist_per_sample=0.0, orient=None, orient_sign='z'):

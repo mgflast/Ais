@@ -24,7 +24,8 @@ import tarfile
 import tempfile
 import Ais.core.se_scnt as se_scnt
 from Ais.core.normalization import global_stats, NORM_GLOBAL_MAD
-from Ais.core.keras_compat import KERAS_VERSION, load_keras_model, save_keras_model, with_free_input, no_auto_xla
+from Ais.core.keras_compat import KERAS_VERSION, load_keras_model, with_free_input, no_auto_xla
+from Ais.core.keras2_h5 import save_keras2_h5
 
 
 
@@ -368,7 +369,7 @@ class SEModel:
             slice_path = None
             thumbnail_path = None
 
-            save_keras_model(self.model, model_path)
+            keras2 = save_keras2_h5(self.model, model_path)
             if validation_slice is not None:
                 slice_path = os.path.join(temp_dir, base_name + "_slice.tiff")
                 tifffile.imwrite(slice_path, validation_slice)
@@ -409,7 +410,7 @@ class SEModel:
                 'normalization': self.normalization,
                 'z_jitter': self.z_jitter,
                 'tta': self.tta,
-                'keras_version': KERAS_VERSION   # Keras 2 cannot read the model description in a Keras 3 file
+                'keras_version': KERAS_VERSION   # the Keras that saved the model
             }
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f)
@@ -420,6 +421,7 @@ class SEModel:
                 if slice_path:
                     archive.add(slice_path, arcname=os.path.basename(slice_path))
                     archive.add(thumbnail_path, arcname=os.path.basename(thumbnail_path))
+        return keras2   # False: saved in the Keras 3 format, which Ais 1.2.40 and earlier cannot read
 
     @staticmethod
     def load_metadata(file_path):
