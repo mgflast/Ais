@@ -28,7 +28,7 @@ setup(
     include_package_data=False,  # weirdly, the above filetypes _are_ included when this parameter is set to False.
     install_requires=[
         "imgui>=2.0.0",
-        "tensorflow>=2.8.0,<=2.11.1",
+        "tensorflow>=2.8.0,<2.16",
         "protobuf>=3.19.0,<=3.20.3",
         "glfw>=2.5.5",
         "PyOpenGL>=3.1.6",
