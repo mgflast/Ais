@@ -453,6 +453,8 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
                     for bs in range(z_start, z_end, batch_size):
                         bjs = list(range(bs, min(bs + batch_size, z_end)))
                         inp = np.stack([_parse_input_for_slice(vi, bj, model_depth, model_dimensionality) for bj in bjs])
+                        if xla and len(bjs) < batch_size:   # keep one batch shape, so XLA doesn't recompile for every tomogram's last batch
+                            inp = np.concatenate([inp, np.zeros((batch_size - len(bjs),) + inp.shape[1:], dtype=inp.dtype)])
                         res = new_model(inp, training=False).numpy()
                         for i, bj in enumerate(bjs):
                             si[bj] = np.squeeze(res[i])
