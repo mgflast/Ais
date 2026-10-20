@@ -75,7 +75,7 @@ def _tile_starts(n, tile, stride):
     return starts
 
 
-def _infer_slab(model, vi, depth, z_start, z_end, jitter_half=0, tile=None, overlap=None):
+def _infer_slab(model, vi, depth, z_start, z_end, jitter_half=0, tile=None, overlap=None, z_stride=None):
     """Slab (3D) inference for a model that emits a full Z-slab: tile [z_start, z_end) into
     overlapping depth-`depth` slabs AND tile each slab in XY, run each tile, and blend. Each slab
     slice is weighted by a trapezoid peaking over the trained reliable range [center +/- jitter_half]
@@ -85,7 +85,7 @@ def _infer_slab(model, vi, depth, z_start, z_end, jitter_half=0, tile=None, over
     tile < 0 disables XY tiling: the whole plane goes through in one piece, as it used to.
     vi is (Z, Y, X); slices outside [z_start, z_end) are left at 0."""
     nz, ny, nx = vi.shape
-    stride = max(1, depth // 2)   # 50% Z overlap -> each slice covered by ~2 slabs
+    stride = max(1, depth // 2) if z_stride is None else max(1, min(int(z_stride), depth))   # default 50% Z overlap
     if nz <= depth:
         starts = [0]
     else:
@@ -276,7 +276,7 @@ def _install_claim_cleanup():
         pass
 
 
-def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_augmentation=1, overwrite=False, model_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=4, center=100.0, tile_size=None, overlap=None, data_apix=None):
+def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_augmentation=1, overwrite=False, model_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=4, center=100.0, tile_size=None, overlap=None, data_apix=None, z_stride=None):
     from keras.models import clone_model
     from keras.layers import Input
 
@@ -421,7 +421,7 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
                 z_start = (n_z - n_center) // 2
                 z_end = z_start + n_center
                 if is_slab:
-                    si = _infer_slab(new_model, vi, model_depth, z_start, z_end, se_model.z_jitter // 2, tile_size, overlap)
+                    si = _infer_slab(new_model, vi, model_depth, z_start, z_end, se_model.z_jitter // 2, tile_size, overlap, z_stride)
                 else:
                     for bs in range(z_start, z_end, batch_size):
                         bjs = list(range(bs, min(bs + batch_size, z_end)))
@@ -443,7 +443,7 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
     executor.shutdown(wait=False)
 
 
-def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus, test_time_augmentation=1, parallel=1, overwrite=0, processing_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=None, center=100.0, tile_size=None, overlap=None, data_apix=None):
+def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus, test_time_augmentation=1, parallel=1, overwrite=0, processing_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=None, center=100.0, tile_size=None, overlap=None, data_apix=None, z_stride=None):
     if n_workers is None:
         n_workers = min(16, max(1, (os.cpu_count() or 1) // len(gpus)))
     if not os.path.isabs(model_path):
@@ -524,7 +524,8 @@ def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus,
                     center,
                     tile_size,
                     overlap,
-                    data_apix
+                    data_apix,
+                    z_stride
                 ),
             )
             processes.append(p)
@@ -549,7 +550,8 @@ def dispatch_parallel_segment(model_path, data_patterns, output_directory, gpus,
             center,
             tile_size,
             overlap,
-            data_apix
+            data_apix,
+            z_stride
         )
 
 
@@ -1109,6 +1111,57 @@ class _ScanDisplay:
                 print(self._feat_line(f, ncols))
 
 
+def _collect_scns(inputs):
+    """Expand -d inputs (directories, glob patterns, or .scns files) into (dirs, .scns paths).
+    Patterns are globbed here too, since Windows shells don't expand '*/denoised'."""
+    if isinstance(inputs, str):
+        inputs = [inputs]
+    dirs, scns, seen = [], [], set()
+    for entry in inputs:
+        matches = sorted(glob.glob(entry)) if any(c in entry for c in '*?[') else [entry]
+        for m in matches:
+            if os.path.isdir(m):
+                dirs.append(m)
+                found = sorted(glob.glob(os.path.join(m, "*.scns")))
+            elif m.endswith(".scns") and os.path.isfile(m):
+                found = [m]
+            else:
+                found = []
+            for s in found:
+                key = os.path.abspath(s)
+                if key not in seen:
+                    seen.add(key)
+                    scns.append(s)
+    return dirs, scns
+
+
+def _resolve_tomogram(stored_path, annotation, data_dirs):
+    """Find the tomogram a .scns refers to. Tries the stored path, then progressively shorter
+    trailing parts of it (longest first) relative to the current directory, the .scns directory
+    and its parents, and the -d directories. This handles .scns files that were moved away from
+    their tomograms, relative paths, and paths saved on another machine / mount (e.g. Z:\\ vs /cifs)."""
+    if os.path.isfile(stored_path):
+        return stored_path
+    parts = [p for p in stored_path.replace('\\', '/').split('/') if p and not p.endswith(':')]
+    if not parts:
+        return None
+    scns_dir = os.path.dirname(os.path.abspath(annotation))
+    bases = [scns_dir, os.getcwd()]
+    d = scns_dir
+    while os.path.dirname(d) != d:
+        d = os.path.dirname(d)
+        bases.append(d)
+    bases += [os.path.abspath(x) for x in data_dirs]
+    bases = list(dict.fromkeys(bases))
+    for k in range(len(parts), 0, -1):
+        suffix = os.path.join(*parts[-k:])
+        for base in bases:
+            candidate = os.path.join(base, suffix)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
 def extract_training_data(features, data_directory, output_directory, box_size, box_depth, exclude=None, merge=False, coordinates=False, apix=10.0, easymode=False):
     import pickle, tempfile, shutil
     import starfile, pandas as pd
@@ -1123,7 +1176,10 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
     # failure mode). box_depth stays the MODEL depth; the .scnt just carries the extra context.
     Z_JITTER = 16 if box_depth > 1 else 0   # +-8: every output position of a 16-slab gets the annotated slice
     stored_depth = box_depth + Z_JITTER
-    annotated_tomograms = glob.glob(os.path.join(data_directory, "*.scns"))
+    data_dirs, annotated_tomograms = _collect_scns(data_directory)
+    if not annotated_tomograms:
+        print(f'no .scns files found in {" ".join(data_directory) if isinstance(data_directory, (list, tuple)) else data_directory}')
+        return
 
     excluded_files = []
     excluded_patterns = []
@@ -1169,18 +1225,17 @@ def extract_training_data(features, data_directory, output_directory, box_size, 
             w_notes.append(f"error loading {os.path.basename(annotation)}: {e}")
             return w_notes, w_adds, w_tasks, w_coords
 
-        tomo = se_frame.path
-        if not os.path.exists(tomo):
-            tomo = os.path.join(os.path.dirname(annotation), os.path.basename(se_frame.path.replace('\\','/')))
-
-        tomo_stem = os.path.splitext(os.path.basename(tomo))[0]
+        tomo_stem = os.path.splitext(os.path.basename(se_frame.path.replace('\\', '/')))[0]
         if _is_excluded(tomo_stem):
             w_notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)} - excluded' + '\033[0m')
             return w_notes, w_adds, w_tasks, w_coords
 
-        if not coordinates and not os.path.exists(tomo):
-            w_notes.append('\033[38;5;208m' + f'tomogram not found at {tomo} - skipping' + '\033[0m')
-            return w_notes, w_adds, w_tasks, w_coords
+        tomo = _resolve_tomogram(se_frame.path, annotation, data_dirs)
+        if tomo is None:
+            if not coordinates:
+                w_notes.append('\033[38;5;208m' + f'{os.path.basename(annotation)}: tomogram {se_frame.path} not found (also searched next to the .scns, in the -d directories, and relative to the current directory) - skipping' + '\033[0m')
+                return w_notes, w_adds, w_tasks, w_coords
+            tomo = se_frame.path.replace('\\', '/')   # coordinates only need the name
 
         tomo_mrc_name = os.path.basename(tomo).split("__")[0] + ".mrc"
 

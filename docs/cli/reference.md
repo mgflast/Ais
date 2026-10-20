@@ -7,14 +7,14 @@ Ais offers a command-line interface for the parts of the workflow that don't nee
 Extract training data from annotated tomograms. Annotations you save in the GUI are stored as `.scns` files; `ais extract` reads those and writes `.scnt` training-data files — one per feature — that `ais train` consumes. Extracting can be done from the GUI, but if you have `.scns` files on disk that you want to extract your labelled training data from, you don't have to open the GUI at all. Important parameters are `-size`, `-depth`, and `-apix`.
 
 ```
-ais extract -d <data_directory> -f <features...> [-ou <output_directory>] [-size <box_size>] [-depth <box_depth>] [-e <exclude>] [-a <apix>] [--merge] [--coordinates]
+ais extract -d <data_directory...> -f <features...> [-ou <output_directory>] [-size <box_size>] [-depth <box_depth>] [-e <exclude>] [-a <apix>] [--merge] [--coordinates]
 ```
 
 ### Options
 
 | Option | Description |
 | --- | --- |
-| `-d`, `--data_directory` | Directory containing the annotated tomograms (`.scns` files). **Required.** |
+| `-d`, `--data_directory` | One or more directories containing the annotated tomograms (`.scns` files). Glob patterns (`-d */denoised`) and individual `.scns` files are accepted too. **Required.** |
 | `-f`, `--features` | Features to extract, e.g. `-f Membrane Ribosome Microtubule`. A separate output file is written for each. **Required.** |
 | `-ou`, `--output_directory` | Where to write the `.scnt` files. Default: current directory. |
 | `-size`, `--box-size` | Box size in pixels. Default 128; if omitted, the size stored in the annotations is used. |
@@ -29,9 +29,12 @@ ais extract -d <data_directory> -f <features...> [-ou <output_directory>] [-size
 ```
 ais extract -d warp_tiltseries/reconstruction/denoised -f Membrane -ou training_data
 ais extract -d warp_tiltseries/reconstruction/denoised -f Membrane Ribosome -depth 5 --merge -ou training_data
+ais extract -d */denoised -f Membrane -ou training_data
 ```
 
-The first command writes `training_data/128x128x1_Membrane.scnt` (the filename is `<box>x<box>x<depth>_<feature>.scnt`). The second writes one merged file per feature, e.g. `128x128x5_Membrane.scnt` and `128x128x5_Ribosome.scnt`. 
+The first command writes `training_data/128x128x1_Membrane.scnt` (the filename is `<box>x<box>x<depth>_<feature>.scnt`). The second writes one merged file per feature, e.g. `128x128x5_Membrane.scnt` and `128x128x5_Ribosome.scnt`. The third pools the annotations from several datasets' `denoised` directories into one training set.
+
+Each `.scns` file remembers the path of the tomogram it was annotated on, so the `.scns` files don't need to sit next to their tomograms. If that path no longer exists (the files were moved, or the annotations were made on another machine where the drive is mounted elsewhere), `ais extract` also looks next to the `.scns` file, in the `-d` directories, and for the trailing part of the stored path (e.g. `b/denoised/TS_001.mrc`) relative to the current directory and the `.scns` file's parent directories.
 
 *Note:* it is okay for the `-size` and `-apix` arguments to combine into boxes larger than those you annotated. Any image region not contained within a box (a box as placed during annotation in the Ais GUI) will have an 'ignore label' written, meaning it does not factor in to the training. Even though the loss is not scored on these image areas, they still do provide more spatial context during training, which can be helpful.
 
@@ -124,6 +127,9 @@ ais segment -m <model_path> -d <data...> -ou <output_directory> -gpu <gpu_ids> [
 | `--batch` | Slices per inference call. Default 1. You rarely need to change this. |
 | `--workers` | CPU worker threads per GPU. Default: `cpu_count / n_gpus`. You rarely need to change this. |
 | `--center` | Percentage of the volume depth (Z) to process, centred on the middle. E.g. `--center 50` segments only the central half. Default 100, reduce for speed. |
+| `--tile` | XY tile size (px) for 3D models. Default 512, rounded down to a multiple of 32; `-1` disables tiling. Ignored by 2D and 2.5D models. |
+| `--overlap` | Overlap (px) discarded at each side of an XY tile for 3D models. Default 64; raise it if tile seams are visible. |
+| `--stride` | Z stride (slices) between consecutive slabs for 3D models. Default: half the model depth. Smaller strides average more slab predictions per slice, giving smoother output in Z at proportionally higher cost: stride 1 is depth/2 times slower than the default. Ignored by 2D and 2.5D models. |
 
 ### Running on multiple nodes
 
@@ -147,7 +153,7 @@ ais segment -m models/microtubule.scnm -d "warp_tiltseries/reconstruction/denois
 Turn segmented volumes into particle coordinates. `ais pick` reads the segmentation `.mrc` files produced by [`ais segment`](#ais-segment) and writes RELION-style `.star` coordinate files. It has two modes: **blob** (the default, for compact particles) and **filament** (`-filament`, for filaments such as microtubules).
 
 ```
-ais pick -d <data_directory> -t <target> [-ou <output_directory>] [-threshold <v>] [-spacing <A>] [-size <A^3>] [-m <margin>] [-b <binning>] [-p <n>] [--subset <file>] [blob / filament options]
+ais pick -d <data_directory...> -t <target> [-ou <output_directory>] [-threshold <v>] [-spacing <A>] [-size <A^3>] [-m <margin>] [-b <binning>] [-p <n>] [--subset <file>] [blob / filament options]
 ```
 
 ### Options

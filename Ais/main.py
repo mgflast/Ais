@@ -81,6 +81,7 @@ def main():
     segment_parser.add_argument('--workers', required=False, type=int, default=None, help="Number of CPU worker threads per GPU for preprocessing and postprocessing (default: cpu_count / n_gpus). Threads are shared dynamically between the two stages.")
     segment_parser.add_argument('--tile', required=False, type=int, default=None, help="XY tile size (px) for 3D models (default 512; rounded down to a multiple of 32). Tiles are square; the Z extent of a tile is the model's slab depth and is not configurable. Use -1 to disable tiling and segment the full plane in one piece, as before tiling was added - fastest, but needs enough VRAM for the whole tomogram. Ignored by 2D and 2.5D models, which process whole slices.")
     segment_parser.add_argument('--overlap', required=False, type=int, default=None, help="Overlap (px) discarded at each side of an XY tile for 3D models (default 64), so neighbouring tiles stride by tile - 2*overlap. Raise it if tile seams are visible; capped at tile/3.")
+    segment_parser.add_argument('--stride', required=False, type=int, default=None, help="Z stride (slices) between consecutive slabs for 3D models (default: half the model depth). Smaller strides average more slab predictions per slice - smoother in Z, proportionally slower: stride 1 costs (depth / 2) times the default. Ignored by 2D and 2.5D models.")
     segment_parser.add_argument('--center', required=False, type=float, default=100.0, help="Percentage of the volume depth (Z) to segment, centered on the middle. E.g. --center 50 segments only the central 50%%. Default 100 (full volume).")
 
     pick_parser = subparsers.add_parser('pick', help='Pick particles using segmented volumes.')
@@ -124,7 +125,7 @@ def main():
     train_parser.add_argument('-models', '--model_architectures', required=False, action='store_true', help='List available model architectures.')
 
     extract_parsers = subparsers.add_parser('extract', help='Extract training data from annotated tomograms.')
-    extract_parsers.add_argument('-d', '--data_directory', required=True, type=str, help="Directory containing annotated tomograms (.scns files).")
+    extract_parsers.add_argument('-d', '--data_directory', required=True, type=str, nargs='+', help="One or more directories (or glob patterns, or .scns files) containing annotated tomograms, e.g. '-d */denoised'.")
     extract_parsers.add_argument('-ou', '--output_directory', required=False, type=str, default='.', help="Directory to save the extracted training data (.scnt files).")
     extract_parsers.add_argument('-f', "--features", nargs="+", required=True, help="List of features to extract, e.g. 'Membrane Ribosome Microtubule'. A separate output file is created for each feature.")
     extract_parsers.add_argument('-size', "--box-size", required=False, type=int, default=128, help="Box size (in pixels) to extract. This is the output pixel size (see --apix).")
@@ -179,7 +180,8 @@ def main():
                 n_workers=args.workers,
                 center=args.center,
                 tile_size=args.tile,
-                overlap=args.overlap
+                overlap=args.overlap,
+                z_stride=args.stride
             )
 
         elif args.command == 'pick':

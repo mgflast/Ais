@@ -7,22 +7,16 @@ Every feature you annotate has a name, a colour, a box size, a brush size, and a
 </video>
 <p style="text-align: center; font-style: italic; color: var(--md-default-fg-color--light); margin-top: 0.5em;">Loading a saved feature's settings when adding a new annotation.</p>
 
-## What it stores
-
-Each library entry keeps, per feature:
+Open the library from **Settings → Feature library → Open library**. Add features and set their annotation and rendering settings — the panel toggles between the two:
 
 - **Annotation settings** — name, colour, box size, brush size, and overlay opacity.
 - **Rendering settings** — the isosurface level, dust size, and transparency used in the Render tab.
 
 Libraries are saved to `~/.Ais/feature_library.txt` and persist across datasets and sessions. You can keep several named libraries and switch which one is active.
 
-!!! note "Multiple libraries"
-    Keep a large catalogue for a big project, and a small, focused library — just the handful of features a given analysis needs — for that analysis. You switch the active library from the same menu.
+When you add a new annotation to a tomogram, the drop-down menu for that feature's title lists your presets. Select one to set its colour, brush size, and box size to the predefined values.
 
-## How to use it
-
-1. Open the library from **Settings → Feature library → Open library**. Add features and set their annotation and rendering settings — the panel toggles between the two.
-2. When you add an annotation, right-click its title to pick a saved feature; its settings load in one click.
+When you load a model whose name is in the feature library, it takes that feature's colour. In the Render tab, a feature whose name is in the library is likewise rendered with that feature's colour, dust size, and isosurface level.
 
 !!! note "The icon buttons"
     The three round icon buttons at the top-left of the window, just right of the menu bar, are shortcuts: a sparkle toggles party mode, a moon toggles dark mode, and the third — the library icon — opens the feature library.
