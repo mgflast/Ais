@@ -202,3 +202,17 @@ ais pick -d segmentations -t Microtubule -ou coordinates -filament -length 800 -
 ```
 
 When picking from Ais volumes, values are 0–255 and 128 is a good default threshold. Use the Ais 3D renderer or ChimeraX to find appropriate threshold, spacing, and size values that work for your target.
+
+## `ais convert`
+
+Re-save a model (`.scnm`) in the Keras 2 format. Ais saves every model in that format, also with TensorFlow 2.16 and later (Keras 3), except a custom architecture with layers or settings outside those of the built-in architectures, which is saved in the Keras 3 format. This version of Ais reads both with every supported TensorFlow, but Ais 1.2.40 and earlier read only the Keras 2 format. A converted model loads in every Ais version.
+
+```
+ais convert <model_path> [<output_path>]
+```
+
+Without `<output_path>`, the input file is replaced. A custom architecture that Ais cannot write in the Keras 2 format under Keras 3 needs Keras 2 itself, so convert it with TensorFlow 2.15 or older, or with a newer TensorFlow, the matching tf-keras (e.g. `pip install "tf-keras==2.21.*"`) and the environment variable `TF_USE_LEGACY_KERAS=1`:
+
+```
+TF_USE_LEGACY_KERAS=1 ais convert models/membrane.scnm models/membrane_keras2.scnm
+```

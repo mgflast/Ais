@@ -1,6 +1,5 @@
 from tensorflow.keras.callbacks import Callback
-from tensorflow.keras.models import load_model, clone_model, Model
-from tensorflow.keras.layers import Input
+from tensorflow.keras.models import Model
 from tensorflow.keras.backend import clear_session
 import tensorflow as tf
 import tifffile
@@ -25,6 +24,8 @@ import tarfile
 import tempfile
 import Ais.core.se_scnt as se_scnt
 from Ais.core.normalization import global_stats, NORM_GLOBAL_MAD
+from Ais.core.keras_compat import KERAS_VERSION, load_keras_model, with_free_input, no_auto_xla
+from Ais.core.keras2_h5 import save_keras2_h5
 
 
 
@@ -368,7 +369,7 @@ class SEModel:
             slice_path = None
             thumbnail_path = None
 
-            self.model.save(model_path)
+            keras2 = save_keras2_h5(self.model, model_path)
             if validation_slice is not None:
                 slice_path = os.path.join(temp_dir, base_name + "_slice.tiff")
                 tifffile.imwrite(slice_path, validation_slice)
@@ -408,7 +409,8 @@ class SEModel:
                 'loss': self.loss,
                 'normalization': self.normalization,
                 'z_jitter': self.z_jitter,
-                'tta': self.tta
+                'tta': self.tta,
+                'keras_version': KERAS_VERSION   # the Keras that saved the model
             }
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f)
@@ -419,6 +421,7 @@ class SEModel:
                 if slice_path:
                     archive.add(slice_path, arcname=os.path.basename(slice_path))
                     archive.add(thumbnail_path, arcname=os.path.basename(thumbnail_path))
+        return keras2   # False: saved in the Keras 3 format, which Ais 1.2.40 and earlier cannot read
 
     @staticmethod
     def load_metadata(file_path):
@@ -458,7 +461,9 @@ class SEModel:
                 if loader is not None:
                     self.model = loader(model_file)
                 else:
-                    self.model = load_model(model_file, compile=compile)
+                    # a model saved by Keras 3 and loaded in Keras 2 is rebuilt from its architecture, and only
+                    # its weights are read from the file
+                    self.model = load_keras_model(model_file, rebuild=lambda: SEModel._rebuild(metadata), compile=compile)
                 self.toggle_inference()
 
                 self.title = metadata['title']
@@ -504,6 +509,15 @@ class SEModel:
 
         except Exception as e:
             print("Error loading model - see details below\n", e)
+
+    @staticmethod
+    def _rebuild(metadata):
+        arch = metadata.get('arch')
+        if arch is None and 0 <= metadata['model_enum'] < len(SEModel.LEGACY_MODEL_ENUM):
+            arch = SEModel.LEGACY_MODEL_ENUM[metadata['model_enum']]
+        if arch not in SEModel.MODELS:
+            raise ValueError(f"architecture '{arch}' is not in the model library")
+        return SEModel.MODELS[arch]((metadata['box_size'], metadata['box_size'], metadata.get('model_depth', 1)))
 
     def train(self, rate=None, external_callbacks=None, extra_augmentations=False, strategy=None, xla=None, cache=None):
         if self.train_data_path:
@@ -564,6 +578,8 @@ class SEModel:
 
                 if xla:
                     self.model.call = tf.function(self.model.call, jit_compile=True)
+                else:
+                    no_auto_xla(self.model)   # Keras 3: fit() keeps its XLA, the GUI's preview predict() does not
 
                 training_generator, training_steps = loader.as_generator(validation=False)
                 validation_generator, validation_steps = None, None
@@ -613,21 +629,12 @@ class SEModel:
         if not isinstance(self.model, Model):
             self.compilation_mode = 'inference'   # non-Keras models handle variable input sizes themselves
             return
-        config = self.model.get_config()
-        weights = self.model.get_weights()
+        model = no_auto_xla(with_free_input(self.model, batch=1))   # the GUI's slice shapes change
 
         del self.model
         clear_session()
 
-        input_shape = list(config["layers"][0]["config"]["batch_input_shape"])
-        input_shape[0] = 1
-        input_shape[1] = None
-        input_shape[2] = None
-
-        self.model = None
-        config["layers"][0]["config"]["batch_input_shape"] = tuple(input_shape)
-        self.model = Model.from_config(config)
-        self.model.set_weights(weights)
+        self.model = model
 
         self.compilation_mode = 'inference'
 

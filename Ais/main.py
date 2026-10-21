@@ -137,6 +137,10 @@ def main():
     extract_parsers.add_argument('--coordinates', required=False, action='store_true', help="Instead of exporting annotated training images, export just the box coordinates as a .star file.")
     extract_parsers.add_argument('--easymode', required=False, action='store_true', help=argparse.SUPPRESS)
 
+    convert_parser = subparsers.add_parser('convert', help='Re-save a model in the Keras 2 format, which Ais versions up to 1.2.40 and TensorFlow 2.15 or older can read. Ais saves models in that format under Keras 3 too, except custom architectures it cannot translate; those need Keras 2 here: TensorFlow 2.15 or older, or newer TensorFlow with tf-keras installed and TF_USE_LEGACY_KERAS=1.')
+    convert_parser.add_argument('model_path', type=str, help="Path to the model file (.scnm).")
+    convert_parser.add_argument('output_path', type=str, nargs='?', default=None, help="Path to save the converted model to (default: replace the input file).")
+
     # fviz_parser = subparsers.add_parser('feature_visualisation', help="Synthesize input images that maximally activate a model's output feature (feature visualization).")
     # fviz_parser.add_argument('-m', '--model_path', required=True, type=str, help="Path to the model file (.scnm).")
     # fviz_parser.add_argument('-size', '--size', required=False, type=int, default=64, help="Side length (pixels) of the synthesized square images. Rounded up to a multiple of 32 (min 64). Default 64.")
@@ -238,6 +242,8 @@ def main():
                                          coordinates=args.coordinates,
                                          apix=args.apix,
                                          easymode=args.easymode)
+        elif args.command == 'convert':
+            aiscli.convert_model(args.model_path, args.output_path)
         # elif args.command == 'feature_visualisation':
         #     from Ais.core.feature_vis import run_feature_visualisation
         #     run_feature_visualisation(model_path=args.model_path,

@@ -311,9 +311,9 @@ def _fviz_worker(rank, gpus, model_path, size, n_images, iterations, seed, stagi
 
     import tensorflow as tf
     tf.get_logger().setLevel('ERROR')
-    from tensorflow.keras.models import Model, clone_model
-    from tensorflow.keras.layers import Input
+    from tensorflow.keras.models import Model
     from Ais.core.se_model import SEModel
+    from Ais.core.keras_compat import with_free_input
 
     tf.random.set_seed(seed + rank)
     np.random.seed((seed + rank) % (2 ** 32))
@@ -334,9 +334,7 @@ def _fviz_worker(rank, gpus, model_path, size, n_images, iterations, seed, stagi
     # batch of neurons at once (the loaded inference model fixes batch=1), and
     # variable spatial size so _synthesize can reflect-pad each forward pass the
     # way Ais's apply_to_slice does.
-    var_input = Input(shape=(None, None, depth)) if input_rank == 4 else Input(shape=(None, None, depth, 1))
-    model = clone_model(base, input_tensors=var_input)
-    model.set_weights(base.get_weights())
+    model = with_free_input(base)
 
     out_layer = model.layers[-1]
 

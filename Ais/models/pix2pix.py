@@ -4,6 +4,8 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import CallbackList
 import tensorflow as tf
 from .losses import masked_bce
+from Ais.core.keras_compat import load_keras_model
+from Ais.core.keras2_h5 import save_keras2_h5
 
 # adapted from source: https://github.com/eriklindernoren/Keras-GAN
 title = "Pix2pix"
@@ -17,7 +19,18 @@ def create(input_shape):
 
 
 def load_model(path):
-    return Pix2Pix(generator=tf.keras.models.load_model(path, compile=False))
+    # Keras 2 cannot read a generator saved by Keras 3; it is then rebuilt, for the input channels of its first layer
+    return Pix2Pix(generator=load_keras_model(path, rebuild=lambda: Pix2Pix((None, None, _input_channels(path))).generator))
+
+
+def _input_channels(path):
+    import h5py
+    with h5py.File(path, 'r') as f:
+        weights = f['model_weights']
+        for name in weights.attrs['layer_names']:
+            layer = weights[name]
+            if len(layer.attrs['weight_names']):
+                return layer[layer.attrs['weight_names'][0]].shape[2]   # first Conv2D kernel: (4, 4, channels, gf)
 
 
 class Pix2Pix:
@@ -165,7 +178,7 @@ class Pix2Pix:
         self.generator.set_weights(weights)
 
     def save(self, model_path):
-        self.generator.save(model_path)
+        return save_keras2_h5(self.generator, model_path)
 
     def load(self, model_path):
-        self.generator = tf.keras.models.load_model(model_path, compile=False)
+        self.generator = load_keras_model(model_path)

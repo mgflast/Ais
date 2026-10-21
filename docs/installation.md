@@ -7,7 +7,7 @@ Ais works on Windows and Linux systems, but not on macOS. To ensure Ais's requir
 ```
 conda create --name ais
 conda activate ais
-conda install python==3.9
+conda install python==3.10
 conda install pip
 pip install git+https://github.com/mgflast/Ais
 ```
@@ -25,6 +25,17 @@ To enable processing on the GPU, TensorFlow must be set up to use CUDA. This can
 
 - [Installing CUDA](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html)
 - [Installing cuDNN](https://docs.nvidia.com/deeplearning/cudnn/install-guide/index.html)
+
+Ais supports TensorFlow 2.8.2 to 2.21. The simplest setup is TensorFlow 2.21 (Python 3.10 to 3.13), which ships its own CUDA and cuDNN libraries, so that only the NVIDIA driver needs to be installed:
+
+```
+pip install "tensorflow[and-cuda]==2.21.*"
+pip install ais-cryoet
+```
+
+On native Windows, TensorFlow 2.10 is the last version with GPU support.
+
+TensorFlow 2.16 and later come with Keras 3. Ais saves models in the Keras 2 format there too, so a model trained with any supported TensorFlow loads in every Ais version, including 1.2.40 and earlier. The exception is a custom architecture with layers or settings outside those of the built-in architectures: it is saved in the Keras 3 format, with a warning, and needs `ais convert model.scnm [converted.scnm]` in an environment with Keras 2 (TensorFlow 2.15 or older, or a newer TensorFlow with the matching tf-keras installed, e.g. `pip install "tf-keras==2.21.*"`, and the environment variable `TF_USE_LEGACY_KERAS=1`) before an older Ais can read it.
 
 When running Ais from within an IDE some paths may need to be manually specified. In PyCharm, add the path to the zlib `.dll` to the run configuration environment variables as follows to enable TensorFlow using the GPU:
 
