@@ -36,6 +36,20 @@ class _XLAModel:
         return self.model(x, training=False)
 
 
+class _GraphModel:
+    """The cloned inference model behind one tf.function without XLA: how ``ais segment`` runs on Keras 3 without
+    --xla. Keras 3 dispatches every layer of an eagerly called model through its own op layer, which makes each call
+    more than twice as slow as in Keras 2; traced into one TensorFlow graph, a call is faster than either.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self._call = tf.function(lambda x: model(x, training=False), reduce_retracing=True)
+
+    def __call__(self, x, training=False):
+        return self._call(tf.convert_to_tensor(x))
+
+
 def glfw_init():
     if not glfw.init():
         raise Exception("Could not initialize GLFW library for headless start!")
@@ -302,8 +316,7 @@ def _install_claim_cleanup():
 
 
 def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_augmentation=1, overwrite=False, model_apix=None, postprocessing_sigma=(0, 0, 0), batch_size=16, n_workers=4, center=100.0, tile_size=None, overlap=None, data_apix=None, z_stride=None, xla=False):
-    from keras.models import clone_model
-    from keras.layers import Input
+    from Ais.core.keras_compat import KERAS_3, with_free_input
 
     _install_claim_cleanup()
 
@@ -322,21 +335,19 @@ def _segmentation_thread(model_path, data_paths, output_dir, gpu_id, test_time_a
     input_shape = model.input_shape
     rank = len(input_shape)
 
-    if rank == 4:
-        new_input = Input(shape=(None, None, model_depth))
-    elif rank == 5:
+    if rank == 5:
         model_dimensionality = 3
-        new_input = Input(shape=(None, None, model_depth, 1))
-    else:
+    elif rank != 4:
         raise ValueError(f"Unsupported model input rank: {input_shape}")
 
-    new_model = clone_model(model, input_tensors=new_input)
-    new_model.set_weights(model.get_weights())
+    new_model = with_free_input(model)
     # a slab model emits a full Z-slab (rank-5 output); it needs Z-tiled slab inference rather
     # than the per-slice window loop.
     is_slab = (len(new_model.output_shape) == 5)
     if xla:
         new_model = _XLAModel(new_model)
+    elif KERAS_3:
+        new_model = _GraphModel(new_model)
 
     import threading
     import queue as _queue
@@ -631,11 +642,11 @@ def resolve_model_architecture(architecture):
 
 
 def train_model(training_data, output_directory, architecture=None, epochs=50, batch_size=32, negatives=0.0, copies=4, model_path='', gpus="0", parallel=1, rate=1e-3, name="Unnamed model", extra_augmentations=False, filament=None, xla=None, cache=None):
-    import keras.callbacks
+    from tensorflow.keras.callbacks import Callback
 
     architecture = resolve_model_architecture(architecture)
 
-    class CheckpointCallback(keras.callbacks.Callback):
+    class CheckpointCallback(Callback):
         def __init__(self, se_model, path):
             super().__init__()
             self.se_model = se_model
@@ -708,6 +719,30 @@ def train_model(training_data, output_directory, architecture=None, epochs=50, b
     model.toggle_inference()
     model.save(file_path)
     print(f"\nDone training {os.path.join(output_directory, f'{model.title}{cfg.filetype_semodel}')}")
+
+
+def convert_model(model_path, output_path=None):
+    """Re-save a model in the Keras 2 format. A model saved by Keras 3 (TensorFlow 2.16 and later) holds a model
+    description that Keras 2 cannot parse; new Ais rebuilds the architecture in that case, but older Ais cannot."""
+    import tempfile
+    from Ais.core.keras_compat import KERAS_3, KERAS_VERSION
+
+    if KERAS_3:
+        print(f"Error: ais convert needs Keras 2 to write the Keras 2 format, but TensorFlow {tf.__version__} uses Keras {KERAS_VERSION}. "
+              f"Run it with TensorFlow 2.15 or older, or install tf-keras=={tf.__version__.rsplit('.', 1)[0]}.* and set TF_USE_LEGACY_KERAS=1.")
+        exit(1)
+    output_path = os.path.abspath(output_path or model_path)
+    model = SEModel(no_glfw=True)
+    model.load(model_path)
+    if model.model is None:
+        exit(1)   # load() printed why
+    # save() names the files inside the archive after the output file; write it beside the output, then move it
+    # into place, so a failed save never leaves a partial file (or, in place, destroys the input)
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(output_path)) as temp_dir:
+        temp_path = os.path.join(temp_dir, os.path.basename(output_path))
+        model.save(temp_path)
+        os.replace(temp_path, output_path)
+    print(f"Saved {output_path} in the Keras {KERAS_VERSION} format.")
 
 
 def _pick_tomo(tomo_path, output_path, margin, threshold, binning, spacing, size, spacing_px, size_px, verbose, filament=False, filament_length=500.0, filament_length_px=None, centroid=False, min_particles=0, twist_per_sample=0.0, orient=None, orient_sign='z'):

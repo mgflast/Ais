@@ -23,31 +23,19 @@ def load_model_and_data(model_path, data_path, gpu_id=0):
     tf.get_logger().setLevel('ERROR')
     for device in tf.config.list_physical_devices('GPU'):
         tf.config.experimental.set_memory_growth(device, True)
-    from keras.models import load_model
-    from keras.models import Model
-    from keras.backend import clear_session
+    from Ais.core.keras_compat import load_keras_model, with_free_input
 
     with tempfile.TemporaryDirectory() as tmp:
         with tarfile.open(model_path, 'r') as archive:
             archive.extractall(path=tmp)
         weights_file = glob.glob(os.path.join(tmp, "*_weights.h5"))[0]
         metadata_file = glob.glob(os.path.join(tmp, "*_metadata.json"))[0]
-        model = load_model(weights_file, compile=False)
+        model = load_keras_model(weights_file)
         with open(metadata_file, 'r') as f:
             metadata = json.load(f)
 
     # Rebuild model with flexible spatial dims (same as se_model.toggle_inference)
-    config = model.get_config()
-    weights = model.get_weights()
-    input_shape = list(config["layers"][0]["config"]["batch_input_shape"])
-    input_shape[0] = 1
-    input_shape[1] = None
-    input_shape[2] = None
-    config["layers"][0]["config"]["batch_input_shape"] = tuple(input_shape)
-    del model
-    clear_session()
-    model = Model.from_config(config)
-    model.set_weights(weights)
+    model = with_free_input(model, batch=1)
 
     model_title = metadata.get('title', 'unknown')
     model_depth = metadata.get('model_depth', 1)
